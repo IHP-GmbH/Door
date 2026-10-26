@@ -187,13 +187,14 @@ QString AssistantAgent::buildSystemPrompt() const
         "You are the DOOR Assistant — a narrow helper for DOOR (library manager) and ROOM "
         "(*.room Python API / converters). Refuse unrelated topics (general coding, news, etc.).\n"
         "\n"
-        "CRITICAL path rules:\n"
-        "- For “selected …” questions: get_app_state → use view_path (a *.room file).\n"
+        "CRITICAL path / selection rules:\n"
+        "- “selected / currently selected / current view” ALWAYS means the LIVE SELECTION "
+        "block below (and/or a fresh get_app_state call). NEVER reuse a path pasted earlier "
+        "in the chat — the user may have changed Project/Cell/View between messages.\n"
         "- room.open() ONLY accepts *.room. NEVER open project_file / *.projects.\n"
         "\n"
         "How to answer data questions (instances, pins, layers, …):\n"
-        "1) ALWAYS call get_app_state first — use its view_path and cell for THIS request.\n"
-        "   schematic → *.schematic.room; symbol → *.symbol.room (do not reuse an old path).\n"
+        "1) Prefer LIVE SELECTION view_path + cell. If unsure, call get_app_state again.\n"
         "2) ROOM data/mutate: run_python with `import room` (full API = Room MCP).\n"
         "   If unsure of a name, call room_api_help or room_api_dir — never invent methods.\n"
         "   Print results so Messages shows >>> code + stdout.\n"
@@ -204,7 +205,9 @@ QString AssistantAgent::buildSystemPrompt() const
         "ROOM API facts (do not invent):\n"
         "- Methods need (): db.cells(), cell.content(), cnt.instances(), cnt.pins().\n"
         "- Schematic devices = cnt.instances() (no .devices / .cells on content).\n"
-        "- Instance: inst.name (label), inst.cell_name (master), inst.properties (dict).\n"
+        "- Instance: inst.name (label), inst.cell_name (master), inst.properties (read-only snapshot).\n"
+        "- Mutate: cnt.set_instance_property_by_name('Vdd','value','1.4') then db.save() "
+        "(path optional after open; do NOT assign inst.properties[...] alone).\n"
         "- Pin: pin.name, pin.dir. Cell: cell.name() — method with ().\n"
         "- Typical: db=room.open(view_path); cell=db.find_cell(name) or db.cells()[0]; "
         "cnt=cell.content(); for inst in cnt.instances(): print(inst.name, inst.cell_name)\n"
@@ -213,10 +216,20 @@ QString AssistantAgent::buildSystemPrompt() const
         "inst.name and/or inst.cell_name (`'nmos' in s.lower()`). Use startswith "
         "ONLY if the user says “starts with” / “prefix”.\n"
         "\n"
-        "Python 3 only (print(...), not print \"...\"). Never invent API keys.\n"
-        "\n"
-        "Registered tools:");
+        "Python 3 only (print(...), not print \"...\"). Never invent API keys.\n");
 
+    // Snapshot current UI selection every turn so history cannot stale the path.
+    if (m_mcp && m_mcp->hasTool(QStringLiteral("get_app_state"))) {
+        const QJsonObject st = m_mcp->callTool(QStringLiteral("get_app_state"));
+        lines << QStringLiteral("LIVE SELECTION (authoritative for this turn — ignore older paths in chat):");
+        lines << QStringLiteral("  library=%1").arg(st.value(QStringLiteral("library")).toString());
+        lines << QStringLiteral("  cell=%1").arg(st.value(QStringLiteral("cell")).toString());
+        lines << QStringLiteral("  view=%1").arg(st.value(QStringLiteral("view")).toString());
+        lines << QStringLiteral("  view_path=%1").arg(st.value(QStringLiteral("view_path")).toString());
+        lines << QString();
+    }
+
+    lines << QStringLiteral("Registered tools:");
     if (m_mcp) {
         const QJsonArray manifest = m_mcp->toolsManifest();
         for (const QJsonValue &v : manifest) {

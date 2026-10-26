@@ -2,8 +2,9 @@
 # LibMan GUI tests (QtTest)
 # -------------------------------------------------
 
-QT += core gui widgets testlib concurrent
+QT += core gui widgets testlib concurrent network
 LIBS += -lz
+win32:LIBS += -lcrypt32
 
 TEMPLATE = app
 TARGET = tst_libman_gui
@@ -16,6 +17,7 @@ win32:QMAKE_CXXFLAGS += -Wa,-mbig-obj
 INCLUDEPATH += \
     $$PWD/.. \
     $$PWD/../src \
+    $$PWD/../src/assistant \
     $$PWD/../gds \
     $$PWD/../oas \
     $$PWD/../lstream \
@@ -40,6 +42,11 @@ SOURCES += \
     $$PWD/../src/klayoutCellResolver.cpp \
     $$PWD/../src/lstreamcellreader.cpp \
     $$PWD/../src/mainwindow.cpp \
+    $$PWD/../src/assistant/assistantmcp.cpp \
+    $$PWD/../src/assistant/assistantagent.cpp \
+    $$PWD/../src/assistant/assistantchatpanel.cpp \
+    $$PWD/../src/assistant/securestore.cpp \
+    $$PWD/../src/assistant/roommcpclient.cpp \
     $$PWD/../extension/variantmanager.cpp \
     $$PWD/../extension/variantfactory.cpp \
     $$PWD/../extension/qlineeditd2.cpp \
@@ -118,6 +125,11 @@ SOURCES += \
 HEADERS += \
     $$PWD/tst_libman_gui.h \
     $$PWD/../src/mainwindow.h \
+    $$PWD/../src/assistant/assistantmcp.h \
+    $$PWD/../src/assistant/assistantagent.h \
+    $$PWD/../src/assistant/assistantchatpanel.h \
+    $$PWD/../src/assistant/securestore.h \
+    $$PWD/../src/assistant/roommcpclient.h \
     $$PWD/../src/klayout_tools.h \
     $$PWD/../src/libfileparser.h \
     $$PWD/../src/lstreamcellreader.h \
