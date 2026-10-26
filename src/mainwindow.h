@@ -35,6 +35,10 @@ class SnapshotView;
 class ProjectEditor;
 class PythonConsole;
 class QPlainTextEdit;
+class AssistantChatPanel;
+class AssistantMcp;
+class AssistantAgent;
+class RoomMcpClient;
 
 namespace Ui {
 class MainWindow;
@@ -279,6 +283,7 @@ private slots:
     void                                on_actionShow_Snapshot_toggled(bool);
     void                                on_actionShow_Messages_toggled(bool);
     void                                on_actionShow_Command_Line_toggled(bool);
+    void                                on_actionShow_Assistant_toggled(bool);
     void                                refreshSnapshot();
     void                                runPythonCommand();
     void                                onPythonConsoleOutput(const QString &text);
@@ -324,6 +329,10 @@ private:
     void                                warmWslForXschemIfNeeded();
     void                                updateMessagesPanelVisibility();
     void                                setupPythonConsole();
+    void                                setupAssistant();
+    void                                registerAssistantMcpTools();
+    void                                configureAssistantAgent();
+    void                                persistAssistantSettings();
     void                                appendPythonLog(const QString &text, bool isError = false);
     void                                pushPythonHistory(const QString &code);
     bool                                recallPythonHistory(int delta);
@@ -637,6 +646,11 @@ private:
     QStringList                         m_pythonHistory;                  /*!< Command Line history (newest at end). */
     int                                 m_pythonHistoryIndex = -1;        /*!< Browse index; -1 = editing a new/draft line. */
     QString                             m_pythonHistoryDraft;             /*!< Text saved when Up starts history browse. */
+
+    AssistantChatPanel                 *m_assistantChat = nullptr;        /*!< Bottom-right LLM / MCP assistant chat. */
+    AssistantMcp                       *m_assistantMcp = nullptr;         /*!< In-process MCP tool registry. */
+    AssistantAgent                     *m_assistantAgent = nullptr;       /*!< OpenAI-compatible LLM agent. */
+    RoomMcpClient                      *m_roomMcp = nullptr;              /*!< Stdio client for Room ``python -m room.mcp_server``. */
 };
 
 /*!*******************************************************************************************************************

@@ -138,6 +138,42 @@ void ToolManager::init()
 
     item->addSubProperty(subitem);
 
+    // Assistant (LLM agent) — same keys as EMStudio Preferences → Assistant.
+    QtVariantProperty *assistant =
+        m_vmSettings->addProperty(QtVariantPropertyManager::groupTypeId(), tr("Assistant"));
+    m_pbSettings->addProperty(assistant);
+
+    QtVariantProperty *baseUrl =
+        m_vmSettings->addProperty(QVariant::String, QStringLiteral("ASSISTANT_BASE_URL"));
+    baseUrl->setToolTip(tr(
+        "OpenAI-compatible Chat Completions base URL.\n"
+        "Examples: https://api.openai.com/v1 , http://localhost:11434/v1 (Ollama)."));
+    baseUrl->setValue(m_properties->exists(QStringLiteral("ASSISTANT_BASE_URL"))
+                          ? m_properties->get<QString>(QStringLiteral("ASSISTANT_BASE_URL"))
+                          : QStringLiteral("https://api.openai.com/v1"));
+    assistant->addSubProperty(baseUrl);
+
+    QtVariantProperty *model =
+        m_vmSettings->addProperty(QVariant::String, QStringLiteral("ASSISTANT_MODEL"));
+    model->setToolTip(tr("Model id, e.g. gpt-4o-mini or llama3.1"));
+    model->setValue(m_properties->exists(QStringLiteral("ASSISTANT_MODEL"))
+                        ? m_properties->get<QString>(QStringLiteral("ASSISTANT_MODEL"))
+                        : QStringLiteral("gpt-4o-mini"));
+    assistant->addSubProperty(model);
+
+    QtVariantProperty *apiKey =
+        m_vmSettings->addProperty(VariantManager::filePathTypeId(),
+                                  QStringLiteral("ASSISTANT_API_KEY"));
+    apiKey->setWhatsThis(QStringLiteral("password")); // masked FileEdit + DPAPI at rest
+    apiKey->setToolTip(tr(
+        "API key (Bearer). Required for OpenAI; optional for local Ollama/LM Studio.\n"
+        "Shown masked. Stored encrypted with Windows DPAPI (current user) — "
+        "never written cleartext to settings."));
+    apiKey->setValue(m_properties->exists(QStringLiteral("ASSISTANT_API_KEY"))
+                         ? m_properties->get<QString>(QStringLiteral("ASSISTANT_API_KEY"))
+                         : QString());
+    assistant->addSubProperty(apiKey);
+
     QtVariantEditorFactory *vf = new VariantFactory();
     m_pbSettings->setFactoryForManager(m_vmSettings, vf);
 
@@ -211,6 +247,13 @@ void ToolManager::on_btnOk_clicked()
                 }
 
                 m_properties->set(toolName, toolPath);
+            }
+        }
+
+        if (q->propertyName() == QLatin1String("Assistant")) {
+            QList<QtProperty *> l = q->subProperties();
+            for (QtProperty *p : l) {
+                m_properties->set(p->propertyName(), p->valueText());
             }
         }
     }

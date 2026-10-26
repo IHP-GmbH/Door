@@ -109,6 +109,19 @@ bool watchPathsEqual(const QString &left, const QString &right)
 #include "exportdialog.h"
 #include "room/room_path_utils.h"
 #include "room/room_file_lock.h"
+#include "assistant/assistantchatpanel.h"
+#include "assistant/assistantmcp.h"
+#include "assistant/assistantagent.h"
+#include "assistant/roommcpclient.h"
+#include "assistant/securestore.h"
+
+#include <QEventLoop>
+#include <QJsonArray>
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <QJsonValue>
+#include <QTimer>
+#include <QVBoxLayout>
 
 /*!*******************************************************************************************************************
  * \brief Constructs a LibMan MainWindow object with the given arguments.
@@ -144,6 +157,7 @@ MainWindow::MainWindow(const QString &projFile, const QString &runDir, QWidget *
     connect(&m_klayoutTools, &KLayoutTools::fileLink, this, &MainWindow::appendLogFileLink);
 
     setupPythonConsole();
+    setupAssistant();
 
     m_snapshotView = new SnapshotView(m_ui->snapshotHost);
     auto *snapshotLayout = new QVBoxLayout(m_ui->snapshotHost);
@@ -314,9 +328,13 @@ void MainWindow::closeEvent(QCloseEvent *event)
     settings.setValue("ShowSnapshot", m_ui->groupSnapshot->isVisible());
     settings.setValue("ShowMessages", m_ui->actionShow_Messages->isChecked());
     settings.setValue("ShowCommandLine", m_ui->actionShow_Command_Line->isChecked());
+    settings.setValue("ShowAssistant", m_ui->actionShow_Assistant->isChecked());
     settings.setValue("SnapshotSplitter", m_ui->splitterView->saveState());
     if (m_ui->splitterMessages) {
         settings.setValue("MessagesSplitter", m_ui->splitterMessages->saveState());
+    }
+    if (m_ui->splitterBottom) {
+        settings.setValue("BottomSplitter", m_ui->splitterBottom->saveState());
     }
     settings.endGroup();
 
@@ -374,6 +392,9 @@ void MainWindow::closeEvent(QCloseEvent *event)
             m_properties->get<QString>(QStringLiteral("SchematicSymbolFormat")).trimmed().toUpper();
     }
     settings.setValue(QStringLiteral("SchematicSymbolFormat"), schematicSymbolFormat);
+
+    // Assistant LLM: BASE_URL/MODEL cleartext; API key only as DPAPI blob.
+    persistAssistantSettings();
     settings.endGroup();
 
     checkAndSaveProjectData(event);
@@ -445,6 +466,7 @@ void MainWindow::loadSettings()
     m_ui->actionShow_Snapshot->setChecked(settings.value("ShowSnapshot", false).toBool());
     m_ui->actionShow_Messages->setChecked(settings.value("ShowMessages", true).toBool());
     m_ui->actionShow_Command_Line->setChecked(settings.value("ShowCommandLine", true).toBool());
+    m_ui->actionShow_Assistant->setChecked(settings.value("ShowAssistant", true).toBool());
     m_ui->splitterView->restoreState(settings.value("SnapshotSplitter").toByteArray());
     if (m_ui->splitterMessages) {
         const QByteArray messagesState = settings.value("MessagesSplitter").toByteArray();
@@ -452,6 +474,14 @@ void MainWindow::loadSettings()
             m_ui->splitterMessages->restoreState(messagesState);
         } else {
             m_ui->splitterMessages->setSizes({300, 80});
+        }
+    }
+    if (m_ui->splitterBottom) {
+        const QByteArray bottomState = settings.value("BottomSplitter").toByteArray();
+        if (!bottomState.isEmpty()) {
+            m_ui->splitterBottom->restoreState(bottomState);
+        } else {
+            m_ui->splitterBottom->setSizes({520, 360});
         }
     }
     updateMessagesPanelVisibility();
@@ -511,7 +541,23 @@ void MainWindow::loadSettings()
     }
     m_properties->set(QStringLiteral("SchematicSymbolFormat"), schematicSymbolFormat);
 
+    m_properties->set(
+        QStringLiteral("ASSISTANT_BASE_URL"),
+        settings.value(QStringLiteral("ASSISTANT_BASE_URL"),
+                       QStringLiteral("https://api.openai.com/v1")).toString());
+    m_properties->set(
+        QStringLiteral("ASSISTANT_MODEL"),
+        settings.value(QStringLiteral("ASSISTANT_MODEL"),
+                       QStringLiteral("gpt-4o-mini")).toString());
+    {
+        const QString enc = settings.value(QStringLiteral("ASSISTANT_API_KEY_DPAPI")).toString();
+        const QString plain = SecureStore::unprotectFromBase64(enc);
+        m_properties->set(QStringLiteral("ASSISTANT_API_KEY"), plain);
+    }
+
     settings.endGroup();
+
+    configureAssistantAgent();
 }
 
 /*!*******************************************************************************************************************
@@ -661,6 +707,8 @@ QMap<QString, QString> MainWindow::getCurrentLibraries() const
 void MainWindow::on_actionTools_triggered()
 {
     ToolManager(this, m_properties).exec();
+    persistAssistantSettings();
+    configureAssistantAgent();
 }
 
 /*!*******************************************************************************************************************
@@ -2929,18 +2977,427 @@ void MainWindow::on_actionShow_Command_Line_toggled(bool)
     updateMessagesPanelVisibility();
 }
 
+void MainWindow::on_actionShow_Assistant_toggled(bool)
+{
+    updateMessagesPanelVisibility();
+}
+
 void MainWindow::updateMessagesPanelVisibility()
 {
     const bool showMessages = m_ui->actionShow_Messages->isChecked();
     const bool showCommand = m_ui->actionShow_Command_Line->isChecked();
+    const bool showAssistant = m_ui->actionShow_Assistant->isChecked();
     m_ui->groupMessages->setVisible(showMessages);
     m_ui->groupCommandLine->setVisible(showCommand);
     m_ui->splitterMessages->setVisible(showMessages || showCommand);
+    if (m_ui->groupAssistant) {
+        m_ui->groupAssistant->setVisible(showAssistant);
+    }
+    if (m_ui->splitterBottom) {
+        m_ui->splitterBottom->setVisible(showMessages || showCommand || showAssistant);
+    }
     if (showMessages && showCommand) {
         const QList<int> sizes = m_ui->splitterMessages->sizes();
         if (sizes.size() == 2 && (sizes.at(0) < 40 || sizes.at(1) < 40)) {
             m_ui->splitterMessages->setSizes({300, 80});
         }
+    }
+}
+
+void MainWindow::setupAssistant()
+{
+    if (!m_ui || !m_ui->assistantHost) {
+        return;
+    }
+
+    m_assistantChat = new AssistantChatPanel(m_ui->assistantHost);
+    auto *lay = new QVBoxLayout(m_ui->assistantHost);
+    lay->setContentsMargins(0, 0, 0, 0);
+    lay->setSpacing(0);
+    lay->addWidget(m_assistantChat);
+
+    m_assistantMcp = new AssistantMcp(this);
+    m_roomMcp = new RoomMcpClient(this);
+    registerAssistantMcpTools();
+    m_assistantChat->setMcp(m_assistantMcp);
+
+    m_assistantAgent = new AssistantAgent(this);
+    m_assistantAgent->setMcp(m_assistantMcp);
+    configureAssistantAgent();
+    m_assistantChat->setAgent(m_assistantAgent);
+}
+
+void MainWindow::configureAssistantAgent()
+{
+    if (!m_assistantAgent) {
+        return;
+    }
+    const QString key = m_properties->exists(QStringLiteral("ASSISTANT_API_KEY"))
+                            ? m_properties->get<QString>(QStringLiteral("ASSISTANT_API_KEY"))
+                            : QString();
+    const QString base = m_properties->exists(QStringLiteral("ASSISTANT_BASE_URL"))
+                             ? m_properties->get<QString>(QStringLiteral("ASSISTANT_BASE_URL"))
+                             : QStringLiteral("https://api.openai.com/v1");
+    const QString model = m_properties->exists(QStringLiteral("ASSISTANT_MODEL"))
+                              ? m_properties->get<QString>(QStringLiteral("ASSISTANT_MODEL"))
+                              : QStringLiteral("gpt-4o-mini");
+    m_assistantAgent->configure(key, base, model);
+    if (m_assistantChat) {
+        m_assistantChat->refreshModeUi();
+    }
+}
+
+void MainWindow::persistAssistantSettings()
+{
+    if (!m_properties) {
+        return;
+    }
+
+    QSettings settings(getSettingsHeaderName());
+    settings.beginGroup(QStringLiteral("Tools"));
+
+    auto savePlain = [&](const QString &key, const QString &fallback = QString()) {
+        const QString value = m_properties->exists(key) ? m_properties->get<QString>(key) : fallback;
+        if (value.isEmpty() && fallback.isEmpty() && !m_properties->exists(key)) {
+            return;
+        }
+        settings.setValue(key, value);
+    };
+    savePlain(QStringLiteral("ASSISTANT_BASE_URL"), QStringLiteral("https://api.openai.com/v1"));
+    savePlain(QStringLiteral("ASSISTANT_MODEL"), QStringLiteral("gpt-4o-mini"));
+
+    // Never persist cleartext API key — only DPAPI blob for current Windows user.
+    settings.remove(QStringLiteral("ASSISTANT_API_KEY"));
+    const QString plain = m_properties->exists(QStringLiteral("ASSISTANT_API_KEY"))
+                              ? m_properties->get<QString>(QStringLiteral("ASSISTANT_API_KEY")).trimmed()
+                              : QString();
+    if (plain.isEmpty()) {
+        settings.remove(QStringLiteral("ASSISTANT_API_KEY_DPAPI"));
+    } else {
+        const QString enc = SecureStore::protectToBase64(plain);
+        if (!enc.isEmpty()) {
+            settings.setValue(QStringLiteral("ASSISTANT_API_KEY_DPAPI"), enc);
+        } else {
+            qWarning("DOOR: failed to encrypt ASSISTANT_API_KEY (not saved)");
+            settings.remove(QStringLiteral("ASSISTANT_API_KEY_DPAPI"));
+        }
+    }
+
+    settings.endGroup();
+}
+
+void MainWindow::registerAssistantMcpTools()
+{
+    if (!m_assistantMcp) {
+        return;
+    }
+
+    auto emptySchema = []() {
+        QJsonObject s;
+        s.insert(QStringLiteral("type"), QStringLiteral("object"));
+        s.insert(QStringLiteral("properties"), QJsonObject());
+        return s;
+    };
+
+    m_assistantMcp->registerTool(
+        QStringLiteral("list_tools"),
+        QStringLiteral("List registered MCP tools and descriptions."),
+        emptySchema(),
+        [this](const QJsonObject &) {
+            QJsonObject out;
+            out.insert(QStringLiteral("ok"), true);
+            out.insert(QStringLiteral("tools"), m_assistantMcp->toolsManifest());
+            return out;
+        });
+
+    m_assistantMcp->registerTool(
+        QStringLiteral("get_app_state"),
+        QStringLiteral(
+            "Current project, library, cell, view, and absolute view_path (*.room for schematic/symbol/layout). "
+            "Never open project_file with room.open — use view_path."),
+        emptySchema(),
+        [this](const QJsonObject &) {
+            const QString lib = getCurrentLibraryName();
+            const QString cell = getCurrentGroupName();
+            const QString view = getCurrentViewName();
+            const QString viewPath = getViewPath(lib, cell, view);
+            QJsonObject out;
+            out.insert(QStringLiteral("ok"), true);
+            out.insert(QStringLiteral("project_file"), getCurrentProjectFile());
+            out.insert(QStringLiteral("library"), lib);
+            out.insert(QStringLiteral("cell"), cell);
+            out.insert(QStringLiteral("view"), view);
+            out.insert(QStringLiteral("view_path"), viewPath);
+            out.insert(QStringLiteral("working_dir"), getCurrentWorkingDir());
+            out.insert(QStringLiteral("schematic_symbol_format"),
+                       m_properties->exists(QStringLiteral("SchematicSymbolFormat"))
+                           ? m_properties->get<QString>(QStringLiteral("SchematicSymbolFormat"))
+                           : QStringLiteral("ROOM"));
+            return out;
+        });
+
+    {
+        QJsonObject schema;
+        schema.insert(QStringLiteral("type"), QStringLiteral("object"));
+        QJsonObject props;
+        QJsonObject cellProp;
+        cellProp.insert(QStringLiteral("type"), QStringLiteral("string"));
+        cellProp.insert(QStringLiteral("description"),
+                        QStringLiteral("Destination cell name in the current library"));
+        props.insert(QStringLiteral("target_cell"), cellProp);
+        schema.insert(QStringLiteral("properties"), props);
+        schema.insert(QStringLiteral("required"), QJsonArray{QStringLiteral("target_cell")});
+
+        m_assistantMcp->registerTool(
+            QStringLiteral("copy_selected_view"),
+            QStringLiteral(
+                "Copy the currently selected view file into another cell of the same library "
+                "(creates cell dir + registers the view). Use for “copy selected symbol/schematic "
+                "to cell X”. Prefer this over inventing room.create_cell / file copies."),
+            schema,
+            [this](const QJsonObject &args) {
+                const QString targetCell = args.value(QStringLiteral("target_cell")).toString().trimmed();
+                if (targetCell.isEmpty()) {
+                    return AssistantMcp::errResult(QStringLiteral("target_cell is required"));
+                }
+                const QString lib = getCurrentLibraryName();
+                const QString srcCell = getCurrentGroupName();
+                const QString view = getCurrentViewName();
+                const QString srcPath = getViewPath(lib, srcCell, view);
+                if (lib.isEmpty() || srcCell.isEmpty() || view.isEmpty() || srcPath.isEmpty()
+                    || !QFileInfo::exists(srcPath)) {
+                    return AssistantMcp::errResult(
+                        QStringLiteral("No selected view to copy (lib/cell/view/path missing)"));
+                }
+                if (targetCell == srcCell) {
+                    return AssistantMcp::errResult(
+                        QStringLiteral("target_cell must differ from the selected cell"));
+                }
+
+                QString libRoot = getLibraryPath(lib);
+                if (libRoot.isEmpty()) {
+                    return AssistantMcp::errResult(QStringLiteral("Library root path unknown"));
+                }
+                const QString cellDirPath =
+                    QDir::toNativeSeparators(QDir(libRoot).filePath(targetCell));
+                if (!QDir().mkpath(cellDirPath)) {
+                    return AssistantMcp::errResult(
+                        QStringLiteral("Failed to create cell directory: %1").arg(cellDirPath));
+                }
+
+                const QString dstPath = QDir::toNativeSeparators(
+                    isRoomViewName(view) ? roomViewFilePath(cellDirPath, targetCell, view)
+                                         : QDir(cellDirPath).filePath(targetCell + QLatin1Char('.')
+                                                                      + view));
+                if (QFileInfo::exists(dstPath)) {
+                    return AssistantMcp::errResult(
+                        QStringLiteral("Destination already exists: %1").arg(dstPath));
+                }
+                if (!QFile::copy(srcPath, dstPath)) {
+                    return AssistantMcp::errResult(
+                        QStringLiteral("Failed to copy %1 → %2").arg(srcPath, dstPath));
+                }
+
+                // Best-effort: rewrite primary cell name inside room-json text.
+                {
+                    QFile f(dstPath);
+                    if (f.open(QIODevice::ReadOnly)) {
+                        QByteArray data = f.readAll();
+                        f.close();
+                        const QByteArray trimmed = data.trimmed();
+                        if (trimmed.startsWith('{')) {
+                            QString text = QString::fromUtf8(data);
+                            text.replace(QStringLiteral("\"cell\": \"%1\"").arg(srcCell),
+                                         QStringLiteral("\"cell\": \"%1\"").arg(targetCell));
+                            if (f.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+                                f.write(text.toUtf8());
+                                f.close();
+                            }
+                        }
+                    }
+                }
+
+                if (!registerCellViewAtPath(lib, targetCell, view, dstPath)) {
+                    return AssistantMcp::errResult(
+                        QStringLiteral("Copied file but failed to register view in project"));
+                }
+
+                appendPythonLog(QStringLiteral("# copy_selected_view"));
+                appendPythonLog(QStringLiteral(">>> # %1 → %2").arg(srcPath, dstPath));
+
+                QJsonObject out;
+                out.insert(QStringLiteral("ok"), true);
+                out.insert(QStringLiteral("src_path"), srcPath);
+                out.insert(QStringLiteral("dst_path"), dstPath);
+                out.insert(QStringLiteral("library"), lib);
+                out.insert(QStringLiteral("src_cell"), srcCell);
+                out.insert(QStringLiteral("target_cell"), targetCell);
+                out.insert(QStringLiteral("view"), view);
+                out.insert(QStringLiteral("note"),
+                           QStringLiteral("View copied and registered. Reply with a one-line ack."));
+                return out;
+            });
+    }
+
+    {
+        QJsonObject schema;
+        schema.insert(QStringLiteral("type"), QStringLiteral("object"));
+        QJsonObject props;
+        QJsonObject codeProp;
+        codeProp.insert(QStringLiteral("type"), QStringLiteral("string"));
+        props.insert(QStringLiteral("code"), codeProp);
+        schema.insert(QStringLiteral("properties"), props);
+        schema.insert(QStringLiteral("required"), QJsonArray{QStringLiteral("code")});
+
+        m_assistantMcp->registerTool(
+            QStringLiteral("run_python"),
+            QStringLiteral(
+                "Run Python in DOOR Command Line (ROOM preloaded). "
+                "Code and stdout/stderr appear only in Messages. "
+                "Use print(...) for results. Returns ok/error only — not the printed data."),
+            schema,
+            [this](const QJsonObject &args) {
+                const QString code = args.value(QStringLiteral("code")).toString();
+                if (code.trimmed().isEmpty()) {
+                    return AssistantMcp::errResult(QStringLiteral("code is required"));
+                }
+                if (!m_pythonConsole) {
+                    return AssistantMcp::errResult(QStringLiteral("Python console not available"));
+                }
+                if (!m_pythonConsole->isRunning()) {
+                    m_pythonConsole->start();
+                }
+                if (m_pythonConsole->isBusy()) {
+                    return AssistantMcp::errResult(
+                        QStringLiteral("Command Line is busy — wait and retry."));
+                }
+
+                // Echo like Virtuoso CIW / Command Line.
+                const QStringList lines = code.split(QLatin1Char('\n'));
+                for (int i = 0; i < lines.size(); ++i) {
+                    appendPythonLog((i == 0 ? QStringLiteral(">>> ") : QStringLiteral("... "))
+                                    + lines.at(i));
+                }
+
+                bool finishedOk = false;
+                bool gotFinished = false;
+                QEventLoop loop;
+                QTimer timeout;
+                timeout.setSingleShot(true);
+                QObject::connect(&timeout, &QTimer::timeout, &loop, &QEventLoop::quit);
+                const QMetaObject::Connection finishedConn = QObject::connect(
+                    m_pythonConsole, &PythonConsole::commandFinished, &loop,
+                    [&](bool ok) {
+                        finishedOk = ok;
+                        gotFinished = true;
+                        loop.quit();
+                    });
+                timeout.start(60000);
+                m_pythonConsole->execute(code);
+                loop.exec();
+                QObject::disconnect(finishedConn);
+
+                if (!gotFinished) {
+                    return AssistantMcp::errResult(QStringLiteral("Command Line timed out"));
+                }
+                QJsonObject out;
+                out.insert(QStringLiteral("ok"), finishedOk);
+                out.insert(QStringLiteral("note"),
+                           QStringLiteral(
+                               "Output is in Messages only. Reply with a one-line ack; "
+                               "do not repeat printed data in chat."));
+                if (!finishedOk) {
+                    out.insert(QStringLiteral("error"),
+                               QStringLiteral("Python reported an error — see Messages."));
+                }
+                return out;
+            });
+    }
+
+    // Room MCP tools (available; prefer run_python so results stay in Messages).
+    auto registerRoomProxy = [this](const QString &name, const QString &description,
+                                    const QJsonObject &schema) {
+        m_assistantMcp->registerTool(
+            name, description, schema,
+            [this, name](const QJsonObject &args) {
+                if (!m_roomMcp) {
+                    return AssistantMcp::errResult(QStringLiteral("Room MCP client missing"));
+                }
+                // Do not mirror MCP payloads into Messages — that duplicates Command Line.
+                return m_roomMcp->callTool(name, args);
+            });
+    };
+
+    {
+        QJsonObject pathSchema;
+        pathSchema.insert(QStringLiteral("type"), QStringLiteral("object"));
+        QJsonObject props;
+        QJsonObject p;
+        p.insert(QStringLiteral("type"), QStringLiteral("string"));
+        props.insert(QStringLiteral("path"), p);
+        pathSchema.insert(QStringLiteral("properties"), props);
+        pathSchema.insert(QStringLiteral("required"), QJsonArray{QStringLiteral("path")});
+
+        registerRoomProxy(QStringLiteral("room_info"),
+                          QStringLiteral("ROOM file info via Room MCP (Python API)."),
+                          pathSchema);
+        registerRoomProxy(QStringLiteral("room_sniff"),
+                          QStringLiteral("Fast ROOM header sniff via Room MCP."),
+                          pathSchema);
+        registerRoomProxy(QStringLiteral("room_ls"),
+                          QStringLiteral(
+                              "List cell (device) names — and optionally layers — in a .room file."),
+                          pathSchema);
+    }
+    {
+        QJsonObject schema;
+        schema.insert(QStringLiteral("type"), QStringLiteral("object"));
+        QJsonObject props;
+        QJsonObject code;
+        code.insert(QStringLiteral("type"), QStringLiteral("string"));
+        props.insert(QStringLiteral("code"), code);
+        schema.insert(QStringLiteral("properties"), props);
+        schema.insert(QStringLiteral("required"), QJsonArray{QStringLiteral("code")});
+        registerRoomProxy(
+            QStringLiteral("room_python_eval"),
+            QStringLiteral(
+                "Full ROOM Python API (same as import room). Prefer run_python for "
+                "Messages echo; use this when a returned result value is needed."),
+            schema);
+        registerRoomProxy(
+            QStringLiteral("room_api_help"),
+            QStringLiteral("Cheat-sheet of the full ROOM Python API (Database/Cell/CellContent)."),
+            emptySchema());
+        {
+            QJsonObject schema;
+            schema.insert(QStringLiteral("type"), QStringLiteral("object"));
+            QJsonObject props;
+            QJsonObject obj;
+            obj.insert(QStringLiteral("type"), QStringLiteral("string"));
+            props.insert(QStringLiteral("object"), obj);
+            schema.insert(QStringLiteral("properties"), props);
+            schema.insert(QStringLiteral("required"), QJsonArray{QStringLiteral("object")});
+            registerRoomProxy(
+                QStringLiteral("room_api_dir"),
+                QStringLiteral("Introspect room/Database/Cell/CellContent (dir + signatures)."),
+                schema);
+        }
+    }
+    {
+        QJsonObject schema;
+        schema.insert(QStringLiteral("type"), QStringLiteral("object"));
+        QJsonObject props;
+        for (const char *k : {"source", "dest", "view", "format", "tool", "cell"}) {
+            QJsonObject p;
+            p.insert(QStringLiteral("type"), QStringLiteral("string"));
+            props.insert(QString::fromLatin1(k), p);
+        }
+        schema.insert(QStringLiteral("properties"), props);
+        schema.insert(QStringLiteral("required"),
+                      QJsonArray{QStringLiteral("source"), QStringLiteral("dest")});
+        registerRoomProxy(QStringLiteral("room_convert"),
+                          QStringLiteral("Convert GDS/OAS/Qucs/Xschem ↔ ROOM via Room MCP."),
+                          schema);
     }
 }
 

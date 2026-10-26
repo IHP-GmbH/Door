@@ -77,7 +77,8 @@ QWidget *VariantFactory::createEditor(QtVariantPropertyManager *manager,
         }
 
         QPalette pal;
-        if(property->whatsThis() != "color" && property->whatsThis() != "keywords") {
+        if(property->whatsThis() != "color" && property->whatsThis() != "keywords"
+           && property->whatsThis() != "password") {
             if(QFileInfo( manager->value(property).toString()).isReadable()) {
                 pal.setColor(QPalette::Text, Qt::blue);
             }

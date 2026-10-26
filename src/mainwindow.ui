@@ -223,67 +223,97 @@
        </widget>
        </widget>
       </widget>
-      <widget class="QSplitter" name="splitterMessages">
+      <widget class="QSplitter" name="splitterBottom">
        <property name="orientation">
-        <enum>Qt::Vertical</enum>
+        <enum>Qt::Horizontal</enum>
        </property>
-       <widget class="QGroupBox" name="groupMessages">
-        <property name="title">
-         <string>Messages</string>
+       <widget class="QSplitter" name="splitterMessages">
+        <property name="orientation">
+         <enum>Qt::Vertical</enum>
         </property>
-        <layout class="QVBoxLayout" name="messagesLayout">
-         <property name="spacing">
-          <number>2</number>
+        <widget class="QGroupBox" name="groupMessages">
+         <property name="title">
+          <string>Messages</string>
          </property>
-         <property name="leftMargin">
-          <number>4</number>
+         <layout class="QVBoxLayout" name="messagesLayout">
+          <property name="spacing">
+           <number>2</number>
+          </property>
+          <property name="leftMargin">
+           <number>4</number>
+          </property>
+          <property name="topMargin">
+           <number>4</number>
+          </property>
+          <property name="rightMargin">
+           <number>4</number>
+          </property>
+          <property name="bottomMargin">
+           <number>4</number>
+          </property>
+          <item>
+           <widget class="QTextEdit" name="textMessages"/>
+          </item>
+         </layout>
+        </widget>
+        <widget class="QGroupBox" name="groupCommandLine">
+         <property name="title">
+          <string>Command Line</string>
          </property>
-         <property name="topMargin">
-          <number>4</number>
-         </property>
-         <property name="rightMargin">
-          <number>4</number>
-         </property>
-         <property name="bottomMargin">
-          <number>4</number>
-         </property>
-         <item>
-          <widget class="QTextEdit" name="textMessages"/>
-         </item>
-        </layout>
+         <layout class="QVBoxLayout" name="commandLineLayout">
+          <property name="spacing">
+           <number>2</number>
+          </property>
+          <property name="leftMargin">
+           <number>4</number>
+          </property>
+          <property name="topMargin">
+           <number>4</number>
+          </property>
+          <property name="rightMargin">
+           <number>4</number>
+          </property>
+          <property name="bottomMargin">
+           <number>4</number>
+          </property>
+          <item>
+           <widget class="QPlainTextEdit" name="editPythonCommand">
+            <property name="maximumHeight">
+             <number>120</number>
+            </property>
+            <property name="tabChangesFocus">
+             <bool>false</bool>
+            </property>
+            <property name="lineWrapMode">
+             <enum>QPlainTextEdit::NoWrap</enum>
+            </property>
+           </widget>
+          </item>
+         </layout>
+        </widget>
        </widget>
-       <widget class="QGroupBox" name="groupCommandLine">
+       <widget class="QGroupBox" name="groupAssistant">
         <property name="title">
-         <string>Command Line</string>
+         <string>Assistant</string>
         </property>
-        <layout class="QVBoxLayout" name="commandLineLayout">
+        <layout class="QVBoxLayout" name="assistantLayout">
          <property name="spacing">
-          <number>2</number>
+          <number>0</number>
          </property>
          <property name="leftMargin">
-          <number>4</number>
+          <number>0</number>
          </property>
          <property name="topMargin">
-          <number>4</number>
+          <number>0</number>
          </property>
          <property name="rightMargin">
-          <number>4</number>
+          <number>0</number>
          </property>
          <property name="bottomMargin">
-          <number>4</number>
+          <number>0</number>
          </property>
          <item>
-          <widget class="QPlainTextEdit" name="editPythonCommand">
-           <property name="maximumHeight">
-            <number>120</number>
-           </property>
-           <property name="tabChangesFocus">
-            <bool>false</bool>
-           </property>
-           <property name="lineWrapMode">
-            <enum>QPlainTextEdit::NoWrap</enum>
-           </property>
-          </widget>
+          <widget class="QWidget" name="assistantHost"/>
          </item>
         </layout>
        </widget>
@@ -355,6 +385,7 @@
     </property>
     <addaction name="actionShow_Messages"/>
     <addaction name="actionShow_Command_Line"/>
+    <addaction name="actionShow_Assistant"/>
     <addaction name="separator"/>
     <addaction name="actionShow_Documents"/>
     <addaction name="actionShow_Categories"/>
@@ -553,6 +584,20 @@
    </property>
    <property name="toolTip">
     <string>Show or hide the Python command line</string>
+   </property>
+  </action>
+  <action name="actionShow_Assistant">
+   <property name="checkable">
+    <bool>true</bool>
+   </property>
+   <property name="checked">
+    <bool>true</bool>
+   </property>
+   <property name="text">
+    <string>Assistant</string>
+   </property>
+   <property name="toolTip">
+    <string>Show or hide the Assistant chat</string>
    </property>
   </action>
   <action name="actionShow_Documents">

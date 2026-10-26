@@ -174,6 +174,11 @@ set(SOURCES
     src/lstreamcellreader.cpp
     src/mainwindow.cpp
     src/python_console.cpp
+    src/assistant/assistantmcp.cpp
+    src/assistant/assistantagent.cpp
+    src/assistant/assistantchatpanel.cpp
+    src/assistant/securestore.cpp
+    src/assistant/roommcpclient.cpp
 
     extension/variantmanager.cpp
     extension/variantfactory.cpp
@@ -245,6 +250,11 @@ set(HEADERS
     lstream/lstreamcellwriter.h
     src/mainwindow.h
     src/python_console.h
+    src/assistant/assistantmcp.h
+    src/assistant/assistantagent.h
+    src/assistant/assistantchatpanel.h
+    src/assistant/securestore.h
+    src/assistant/roommcpclient.h
 
     extension/variantmanager.h
     extension/variantfactory.h
@@ -333,6 +343,7 @@ endif()
 target_include_directories(door PRIVATE
     ${CMAKE_SOURCE_DIR}
     ${CMAKE_SOURCE_DIR}/src
+    ${CMAKE_SOURCE_DIR}/src/assistant
     ${CMAKE_SOURCE_DIR}/extension
     ${CMAKE_SOURCE_DIR}/QtPropertyBrowser
     ${CAPNP_GEN_DIR}
@@ -354,6 +365,10 @@ target_link_libraries(door PRIVATE
     kj
     ${LIBMAN_ROOM_LINK_LIBS}
 )
+
+if(WIN32)
+    target_link_libraries(door PRIVATE crypt32)
+endif()
 
 # CML driver next to the binary (python/door_console.py).
 add_custom_command(TARGET door POST_BUILD
