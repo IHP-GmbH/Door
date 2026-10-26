@@ -4,7 +4,7 @@
 #
 #-------------------------------------------------
 
-QT += core gui concurrent
+QT += core gui concurrent network
 greaterThan(QT_MAJOR_VERSION, 4): QT += widgets
 
 TARGET = door
@@ -12,6 +12,7 @@ TEMPLATE = app
 
 CONFIG += c++17
 DEFINES += QT_NO_DEPRECATED_WARNINGS
+INCLUDEPATH += src/assistant
 
 LIBS += -lz
 
@@ -34,6 +35,11 @@ SOURCES += \
     src/klayoutCellResolver.cpp \
     src/lstreamcellreader.cpp \
     src/mainwindow.cpp \
+    src/assistant/assistantmcp.cpp \
+    src/assistant/assistantagent.cpp \
+    src/assistant/assistantchatpanel.cpp \
+    src/assistant/securestore.cpp \
+    src/assistant/roommcpclient.cpp \
     src/python_console.cpp \
     extension/variantmanager.cpp \
     extension/variantfactory.cpp \
@@ -95,6 +101,11 @@ contains(CONFIG, no_room) {
 HEADERS += \
     lstream/lstreamcellwriter.h \
     src/mainwindow.h \
+    src/assistant/assistantmcp.h \
+    src/assistant/assistantagent.h \
+    src/assistant/assistantchatpanel.h \
+    src/assistant/securestore.h \
+    src/assistant/roommcpclient.h \
     src/python_console.h \
     src/klayout_tools.h \
     extension/variantmanager.h \
