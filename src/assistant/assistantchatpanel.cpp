@@ -36,6 +36,7 @@
 #include <QScrollArea>
 #include <QScrollBar>
 #include <QStyle>
+#include <QTextCursor>
 #include <QTimer>
 #include <QToolButton>
 #include <QToolTip>
@@ -130,6 +131,7 @@ QString AssistantChatPanel::tipsText()
         "DOOR / ROOM Assistant (MCP shortcuts without LLM)\n"
         "\n"
         "• Enter = send, Shift+Enter = new line\n"
+        "• Up / Down = previous / next sent message\n"
         "• list tools — registered tools\n"
         "• get app state — current library / cell / view\n"
         "\n"
@@ -305,7 +307,8 @@ void AssistantChatPanel::clearChat()
 }
 
 /*!*******************************************************************************************************************
- * \brief Enter sends the message; Shift+Enter inserts a newline (ignored while busy).
+ * \brief Enter sends; Shift+Enter inserts a newline; Up/Down recalls input history
+ *        (only at first/last line so arrows still move the cursor in multiline text).
  **********************************************************************************************************************/
 bool AssistantChatPanel::eventFilter(QObject *watched, QEvent *event)
 {
@@ -319,6 +322,18 @@ bool AssistantChatPanel::eventFilter(QObject *watched, QEvent *event)
             if (!m_busy)
                 onSend();
             return true;
+        }
+        if (ke->modifiers() == Qt::NoModifier
+            && (ke->key() == Qt::Key_Up || ke->key() == Qt::Key_Down)) {
+            const QTextCursor cursor = m_input->textCursor();
+            const int block = cursor.blockNumber();
+            const int blocks = m_input->document()->blockCount();
+            const bool atFirst = (block <= 0);
+            const bool atLast = (block >= blocks - 1);
+            if (ke->key() == Qt::Key_Up && atFirst)
+                return recallInputHistory(-1);
+            if (ke->key() == Qt::Key_Down && atLast)
+                return recallInputHistory(+1);
         }
     }
     return QWidget::eventFilter(watched, event);
@@ -357,6 +372,7 @@ void AssistantChatPanel::onSend()
     if (text.isEmpty())
         return;
 
+    pushInputHistory(text);
     m_input->clear();
     appendBubble(Role::User, text);
     emit userMessageSubmitted(text);
@@ -464,6 +480,63 @@ QString AssistantChatPanel::buildHeuristicReply(const QString &userText) const
     if (m_mcp)
         return m_mcp->handleUserMessage(userText);
     return tr("MCP is not connected yet.");
+}
+
+/*!*******************************************************************************************************************
+ * \brief Appends a sent message to input history (deduped consecutive, capped at 200).
+ **********************************************************************************************************************/
+void AssistantChatPanel::pushInputHistory(const QString &text)
+{
+    const QString trimmed = text.trimmed();
+    if (trimmed.isEmpty())
+        return;
+    if (!m_inputHistory.isEmpty() && m_inputHistory.last() == trimmed) {
+        m_inputHistoryIndex = -1;
+        m_inputHistoryDraft.clear();
+        return;
+    }
+    m_inputHistory.append(trimmed);
+    constexpr int kMaxHistory = 200;
+    while (m_inputHistory.size() > kMaxHistory)
+        m_inputHistory.removeFirst();
+    m_inputHistoryIndex = -1;
+    m_inputHistoryDraft.clear();
+}
+
+/*!*******************************************************************************************************************
+ * \brief Steps through input history by \a delta (-1 older, +1 newer); restores draft past newest.
+ *
+ * \return true if the key was consumed (always when history is non-empty).
+ **********************************************************************************************************************/
+bool AssistantChatPanel::recallInputHistory(int delta)
+{
+    if (m_inputHistory.isEmpty() || delta == 0)
+        return false;
+
+    if (m_inputHistoryIndex < 0) {
+        m_inputHistoryDraft = m_input->toPlainText();
+        m_inputHistoryIndex = m_inputHistory.size();
+    }
+
+    const int next = m_inputHistoryIndex + delta;
+    if (next < 0)
+        return true; // stay on oldest
+
+    if (next >= m_inputHistory.size()) {
+        m_inputHistoryIndex = -1;
+        m_input->setPlainText(m_inputHistoryDraft);
+        QTextCursor cursor = m_input->textCursor();
+        cursor.movePosition(QTextCursor::End);
+        m_input->setTextCursor(cursor);
+        return true;
+    }
+
+    m_inputHistoryIndex = next;
+    m_input->setPlainText(m_inputHistory.at(m_inputHistoryIndex));
+    QTextCursor cursor = m_input->textCursor();
+    cursor.movePosition(QTextCursor::End);
+    m_input->setTextCursor(cursor);
+    return true;
 }
 
 /*!*******************************************************************************************************************

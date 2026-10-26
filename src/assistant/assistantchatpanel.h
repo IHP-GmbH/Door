@@ -103,6 +103,8 @@ private:
     void removeThinkingBubble();
     void completeAssistantReply(const QString &text);
     QString buildHeuristicReply(const QString &userText) const;
+    void pushInputHistory(const QString &text);
+    bool recallInputHistory(int delta);
     static QString tipsText();
     static QIcon makeSendStopIcon(bool stop, const QColor &fill, const QColor &glyph);
 
@@ -120,6 +122,10 @@ private:
     std::function<void(qreal)> m_setThinkingPhase;
     QTimer *m_shimmerTimer = nullptr;
     qreal m_shimmerPhase = 0.0;
+
+    QStringList m_inputHistory;       /*!< Sent messages (newest at end). */
+    int m_inputHistoryIndex = -1;     /*!< Browse index; -1 = editing draft. */
+    QString m_inputHistoryDraft;      /*!< Text saved when Up starts history browse. */
 
     bool m_busy = false;
     bool m_usingAgent = false;
