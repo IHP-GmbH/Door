@@ -250,7 +250,8 @@ void ToolManager::on_btnOk_clicked()
             }
         }
 
-        if (q->propertyName() == QLatin1String("Assistant")) {
+        if (q->propertyName() == QLatin1String("Assistant")
+            || q->propertyName() == QLatin1String("PDK")) {
             QList<QtProperty *> l = q->subProperties();
             for (QtProperty *p : l) {
                 m_properties->set(p->propertyName(), p->valueText());

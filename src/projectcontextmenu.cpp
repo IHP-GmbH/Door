@@ -252,6 +252,65 @@ void MainWindow::createProjectUnionMenu()
 void MainWindow::showLibraryMenu(const QPoint &pos)
 {
     QTreeWidgetItem *currentItem = m_ui->treeLibs->currentItem();
+    if(currentItem && currentItem->data(0, RoleType).toInt() == ItemPdkRoot) {
+        QMenu *menu = new QMenu(this);
+        QAction *infoAct = new QAction(tr("&Info"), this);
+        connect(infoAct, &QAction::triggered, this, [this, currentItem]() {
+            const QString path = currentItem->data(0, RolePdkPath).toString();
+            const QString pdkName = currentItem->text(0);
+            QString extra = QStringLiteral("\tType: Technology PDK\n");
+            for (const DoorPdkInfo &pdk : m_loadedPdks) {
+                if (pdk.name != pdkName) {
+                    continue;
+                }
+                extra += QStringLiteral("\tDescriptor: ")
+                    + (pdk.descriptorPath.isEmpty() ? QStringLiteral("(auto-detect)")
+                                                    : pdk.descriptorPath)
+                    + QLatin1Char('\n');
+                extra += QStringLiteral("\tlibs.tech layers: ") + pdk.tech.layers + QLatin1Char('\n');
+                extra += QStringLiteral("\tlibs.tech DRC: ") + pdk.tech.drc + QLatin1Char('\n');
+                extra += QStringLiteral("\tlibs.tech LVS: ") + pdk.tech.lvs + QLatin1Char('\n');
+                break;
+            }
+            showFolderInfo(QStringLiteral("PDK"), pdkName,
+                           path.isEmpty() ? getLibraryPath(pdkName) : path,
+                           true, extra);
+        });
+        menu->addAction(infoAct);
+
+        QAction *descAct = new QAction(tr("Edit &Descriptor…"), this);
+        descAct->setStatusTip(tr("Open .door-pdk.json (JSON editor + resolved path tree)."));
+        connect(descAct, &QAction::triggered, this, [this, currentItem]() {
+            const QString pdkName = currentItem->text(0);
+            const QString path = currentItem->data(0, RolePdkPath).toString();
+            editPdkDescriptor(pdkName, path);
+        });
+        menu->addAction(descAct);
+
+        QAction *removeAct = new QAction(tr("&Remove PDK"), this);
+        connect(removeAct, &QAction::triggered, this, [this, currentItem]() {
+            const QString pdkName = currentItem->text(0);
+            for (int i = 0; i < m_loadedPdks.size(); ++i) {
+                if (m_loadedPdks.at(i).name != pdkName) {
+                    continue;
+                }
+                for (const DoorPdkLibrary &lib : m_loadedPdks.at(i).libraries) {
+                    removeLibraryPropertyKeys(lib.name);
+                }
+                m_loadedPdks.removeAt(i);
+                break;
+            }
+            loadLibraries();
+            applyPdkTreeGrouping();
+            setStateChanged();
+            if (!m_currentProjFile.isEmpty()) {
+                saveProjectFile(m_currentProjFile);
+            }
+        });
+        menu->addAction(removeAct);
+        menu->popup(m_ui->treeLibs->mapToGlobal(pos));
+        return;
+    }
     if(currentItem && currentItem->childCount()) {
         createProjectUnionMenu();
         return;
@@ -264,7 +323,7 @@ void MainWindow::showLibraryMenu(const QPoint &pos)
 
     QAction *proj = new QAction(tr("&Add New..."), this);
     proj->setIcon(QIcon(":/icons/category.svg"));
-    proj->setStatusTip(tr("Add new project."));
+    proj->setStatusTip(tr("Add a library directory, or a PDK if .door-pdk.json / Open-PDK layout is present."));
     connect(proj, &QAction::triggered, this, &MainWindow::addNewProject);
     menu->addAction(proj);
 
@@ -660,35 +719,45 @@ void MainWindow::addNewProject()
                                                          tr("Choose or create a new project directory."),
                                                          workDir);
 
-    if(!projName.isEmpty()) {
-        QString libName = QFileInfo(projName).completeBaseName();
+    if (projName.isEmpty()) {
+        return;
+    }
 
-        bool addProj = true;
-        for(int i = 0; i < m_ui->treeLibs->topLevelItemCount(); ++i) {
-            QTreeWidgetItem *item = m_ui->treeLibs->topLevelItem(i);
-            if(item) {
-                if(item->text(0) == libName) {
-                    addProj = false;
-                    break;
-                }
-            }
+    // PDK if .door-pdk.json exists (or classic Open-PDK libs.ref + libs.tech layout).
+    if (tryAddDirectoryAsPdk(projName)) {
+#if QT_VERSION >= 0x050000
+        m_ui->treeLibs->sortByColumn(0, Qt::AscendingOrder);
+#else
+        m_ui->treeLibs->sortByColumn(0);
+#endif
+        return;
+    }
+
+    QString libName = QFileInfo(projName).completeBaseName();
+
+    bool addProj = true;
+    for (int i = 0; i < m_ui->treeLibs->topLevelItemCount(); ++i) {
+        QTreeWidgetItem *item = m_ui->treeLibs->topLevelItem(i);
+        if (item && item->text(0) == libName) {
+            addProj = false;
+            break;
         }
+    }
 
-        if(addProj) {
-            QTreeWidgetItem *item = new QTreeWidgetItem;
-            item->setText(0, libName);
-            m_ui->treeLibs->addTopLevelItem(item);
+    if (addProj) {
+        QTreeWidgetItem *item = new QTreeWidgetItem;
+        item->setText(0, libName);
+        m_ui->treeLibs->addTopLevelItem(item);
 
-            setLibraryRootDirectory(libName, projName);
+        setLibraryRootDirectory(libName, projName);
 
-            m_ui->treeLibs->setCurrentItem(item);
-            on_treeLibs_itemClicked(item, 0);
+        m_ui->treeLibs->setCurrentItem(item);
+        on_treeLibs_itemClicked(item, 0);
 
-            if (!m_currentProjFile.isEmpty()) {
-                saveProjectFile(m_currentProjFile);
-            } else {
-                setStateChanged();
-            }
+        if (!m_currentProjFile.isEmpty()) {
+            saveProjectFile(m_currentProjFile);
+        } else {
+            setStateChanged();
         }
     }
 

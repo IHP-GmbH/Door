@@ -8,6 +8,7 @@
 #include "room/room_path_utils.h"
 #include "src/klayoutCellResolver.h"
 #include "src/klayout_tools.h"
+#include "src/door_pdk.h"
 
 #include <QProcess>
 #include <QMainWindow>
@@ -90,7 +91,8 @@ class MainWindow : public QMainWindow
         RoleLStreamPath          = Qt::UserRole + 5,    /*!< Absolute path to LStream file for "lstream" view node. */
         RoleDocumentPath         = Qt::UserRole + 6,    /*!< Absolute path to document (pdf/txt/etc). */
         RoleCorePath             = Qt::UserRole + 7,    /*!< Absolute path to ROOM (.room) file. */
-        RoleEmSetupPath          = Qt::UserRole + 8     /*!< Absolute path to <cell>.emsetup/ folder. */
+        RoleEmSetupPath          = Qt::UserRole + 8,    /*!< Absolute path to <cell>.emsetup/ folder. */
+        RolePdkPath              = Qt::UserRole + 9     /*!< Absolute PDK root for ItemPdkRoot. */
     };
 
     /*!
@@ -103,7 +105,8 @@ class MainWindow : public QMainWindow
         ItemViewLStream          = 4,                   /*!< "lstr" view root node. */
         ItemViewCore             = 5,                   /*!< "core" view root node. */
         ItemViewEmSetup          = 6,                   /*!< "emsetup" folder view root. */
-        ItemEmSetupVariant       = 7                    /*!< Variant under emsetup (e.g. nominal). */
+        ItemEmSetupVariant       = 7,                   /*!< Variant under emsetup (e.g. nominal). */
+        ItemPdkRoot              = 8                    /*!< Expandable PDK node in Projects tree. */
     };
 
 public:
@@ -230,6 +233,9 @@ private slots:
     void                                showViewInfo();
     void                                convertSelectedViewToJson();
     void                                convertSelectedViewToRoom();
+    void                                convertSelectedGroupsToRoom();
+    bool                                cellHasRoomSchematicOrSymbol(const QString &libName,
+                                                                     const QString &cellName) const;
     void                                showGroupInfo();
     void                                showProjectInfo();
     void                                showCategoryInfo();
@@ -333,6 +339,22 @@ private:
     void                                registerAssistantMcpTools();
     void                                configureAssistantAgent();
     void                                persistAssistantSettings();
+    bool                                registerLoadedPdk(const DoorPdkInfo &pdk, QString *errorOut = nullptr);
+    /*! Reload an already-registered PDK from disk (after editing .door-pdk.json). */
+    bool                                reloadLoadedPdk(const QString &pdkName, QString *errorOut = nullptr);
+    void                                editPdkDescriptor(const QString &pdkName, const QString &pdkRoot);
+    void                                clearLoadedPdks();
+    void                                applyPdkTreeGrouping();
+    bool                                libraryHasIndexedViews(const QString &libName) const;
+    void                                indexPdkLibraryContent(const QString &libName, const QString &libRoot);
+    bool                                tryAddDirectoryAsPdk(const QString &dirPath);
+    QSet<QString>                       pdkMemberLibraryNames() const;
+    const DoorPdkInfo                  *activePdk() const;
+    QString                             resolvePdkRoot() const;
+    QString                             resolvePdkName() const;
+    QString                             resolvePdkPath() const;
+    QJsonObject                         buildPdkStateObject() const;
+    QJsonObject                         buildTechInfoObject() const;
     void                                appendPythonLog(const QString &text, bool isError = false);
     void                                pushPythonHistory(const QString &code);
     bool                                recallPythonHistory(int delta);
@@ -635,6 +657,7 @@ private:
     QTimer                              *m_coreLockRefreshTimer = nullptr; /*!< Debounced refresh for Windows watcher races. */
     QTimer                              *m_coreLockPollTimer = nullptr;    /*!< Periodic stale-lock cleanup (WSL PID checks). */
     QList<QPair<QString, QString>>      m_wildcardDefines;               /*!< define() entries using trailing /* wildcards. */
+    QList<DoorPdkInfo>                  m_loadedPdks;                    /*!< PDK roots from pdk() / Add PDK. */
 
     QHash<QString, std::shared_ptr<GdsCacheEntry>> m_gdsCache;             /*!< GDS hierarchy cache: abs path -> entry. */
     QHash<QString, std::shared_ptr<OasCacheEntry>> m_oasCache;             /*!< OASIS hierarchy cache: abs path -> entry. */

@@ -184,23 +184,45 @@ QString AssistantAgent::buildSystemPrompt() const
 {
     QStringList lines;
     lines << QStringLiteral(
-        "You are the DOOR Assistant — a narrow helper for DOOR (library manager) and ROOM "
-        "(*.room Python API / converters). Refuse unrelated topics (general coding, news, etc.).\n"
+        "You are the DOOR Assistant — helper for DOOR (library manager), ROOM "
+        "(*.room Python API), and the project PDK / tech libraries when configured.\n"
+        "Refuse unrelated topics (news, general coding unrelated to EDA/DOOR/ROOM).\n"
         "\n"
         "CRITICAL path / selection rules:\n"
         "- “selected / currently selected / current view” ALWAYS means the LIVE SELECTION "
-        "block below (and/or a fresh get_app_state call). NEVER reuse a path pasted earlier "
-        "in the chat — the user may have changed Project/Cell/View between messages.\n"
+        "block below. NEVER reuse a path pasted earlier in the chat.\n"
+        "- get_app_state / get_tech_info are DOOR MCP tools. There is NO room.get_app_state().\n"
+        "- run_python injects: view_path, library, cell, view, pdk_root, pdk, pdk_path.\n"
         "- room.open() ONLY accepts *.room. NEVER open project_file / *.projects.\n"
         "\n"
+        "PDK / layout policy:\n"
+        "- PDK is bound via project pdk(\"name\", \"path\") + .door-pdk.json in the PDK root "
+        "(Projects → Add New… on the technology folder; Door detects the descriptor).\n"
+        "- libs.tech (DRC/LVS/layers) is for you via get_tech_info — it is not shown as a "
+        "Project-tree library.\n"
+        "- If LIVE SELECTION shows pdk_configured=yes: you MAY inspect tech and help with "
+        "layout via ROOM API. Prefer get_tech_info before inventing layer numbers.\n"
+        "- If PDK is NOT in the project: tell the user to Add New… the PDK folder "
+        "(e.g. ihp-sg13g2 with .door-pdk.json). Do NOT say a generic “I cannot assist”.\n"
+        "- Layout synthesis (schematic→placed transistors/P&R) is NOT available. Do NOT "
+        "pretend you generated a layout. Do NOT print multi-step “how to draw layout” "
+        "tutorials and then say Done. Say clearly that auto layout is out of scope; "
+        "offer: inspect schematic, get_tech_info layers, create an empty *.layout.room "
+        "skeleton via run_python (ensure_content('layout') + db.save(path,'layout')) then "
+        "register_view, or open KLayout. Only claim success if *.layout.room exists on disk "
+        "and register_view succeeded (View pane shows layout).\n"
+        "\n"
         "How to answer data questions (instances, pins, layers, …):\n"
-        "1) Prefer LIVE SELECTION view_path + cell. If unsure, call get_app_state again.\n"
-        "2) ROOM data/mutate: run_python with `import room` (full API = Room MCP).\n"
-        "   If unsure of a name, call room_api_help or room_api_dir — never invent methods.\n"
+        "1) run_python with `import room` + injected view_path/cell (or LIVE SELECTION literals).\n"
+        "2) If unsure of a name, call room_api_help / room_api_dir — never invent methods.\n"
         "   Print results so Messages shows >>> code + stdout.\n"
         "3) Copy selected view into another library cell folder: copy_selected_view "
         "(DOOR), not Database.create_cell alone.\n"
-        "4) Chat: one short line only (“Done — see Messages.”). Never paste lists.\n"
+        "4) After creating/saving a new *.layout.room / *.schematic.room / *.symbol.room "
+        "beside the cell, call register_view so DOOR’s View pane refreshes.\n"
+        "5) Chat: one short line. Use “Done — see Messages.” ONLY after a successful tool "
+        "that printed real data or created a real file. If you did not create/register a "
+        "layout, do NOT say Done for a layout request — say it was not created.\n"
         "\n"
         "ROOM API facts (do not invent):\n"
         "- Methods need (): db.cells(), cell.content(), cnt.instances(), cnt.pins().\n"
@@ -209,8 +231,12 @@ QString AssistantAgent::buildSystemPrompt() const
         "- Mutate: cnt.set_instance_property_by_name('Vdd','value','1.4') then db.save() "
         "(path optional after open; do NOT assign inst.properties[...] alone).\n"
         "- Pin: pin.name, pin.dir. Cell: cell.name() — method with ().\n"
-        "- Typical: db=room.open(view_path); cell=db.find_cell(name) or db.cells()[0]; "
-        "cnt=cell.content(); for inst in cnt.instances(): print(inst.name, inst.cell_name)\n"
+        "- Typical run_python:\n"
+        "    import room\n"
+        "    db = room.open(view_path)\n"
+        "    c = db.find_cell(cell) or db.cells()[0]\n"
+        "    cnt = c.content()\n"
+        "    for inst in cnt.instances(): print(inst.name, inst.cell_name)\n"
         "\n"
         "Name filters: “containing / with / named like X” → substring on "
         "inst.name and/or inst.cell_name (`'nmos' in s.lower()`). Use startswith "
@@ -226,6 +252,20 @@ QString AssistantAgent::buildSystemPrompt() const
         lines << QStringLiteral("  cell=%1").arg(st.value(QStringLiteral("cell")).toString());
         lines << QStringLiteral("  view=%1").arg(st.value(QStringLiteral("view")).toString());
         lines << QStringLiteral("  view_path=%1").arg(st.value(QStringLiteral("view_path")).toString());
+        lines << QStringLiteral("  pdk_root=%1").arg(st.value(QStringLiteral("pdk_root")).toString());
+        lines << QStringLiteral("  pdk=%1").arg(st.value(QStringLiteral("pdk")).toString());
+        lines << QStringLiteral("  pdk_path=%1").arg(st.value(QStringLiteral("pdk_path")).toString());
+        lines << QStringLiteral("  pdk_configured=%1")
+                     .arg(st.value(QStringLiteral("configured")).toBool() ? QStringLiteral("yes")
+                                                                          : QStringLiteral("no"));
+        const QJsonArray techLibs = st.value(QStringLiteral("tech_libraries")).toArray();
+        QStringList techNames;
+        for (const QJsonValue &v : techLibs) {
+            techNames << v.toString();
+        }
+        lines << QStringLiteral("  tech_libraries=%1")
+                     .arg(techNames.isEmpty() ? QStringLiteral("(none)")
+                                              : techNames.join(QLatin1Char(',')));
         lines << QString();
     }
 

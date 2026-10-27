@@ -107,6 +107,7 @@ bool watchPathsEqual(const QString &left, const QString &right)
 #include "projecteditor.h"
 #include "importdialog.h"
 #include "exportdialog.h"
+#include "door_pdk_descriptor_dialog.h"
 #include "room/room_path_utils.h"
 #include "room/room_file_lock.h"
 #include "assistant/assistantchatpanel.h"
@@ -114,6 +115,11 @@ bool watchPathsEqual(const QString &left, const QString &right)
 #include "assistant/assistantagent.h"
 #include "assistant/roommcpclient.h"
 #include "assistant/securestore.h"
+
+#ifndef LIBMAN_NO_ROOM
+#  include "database.h"
+#  include "room_json_io.h"
+#endif
 
 #include <QEventLoop>
 #include <QJsonArray>
@@ -3086,6 +3092,590 @@ void MainWindow::persistAssistantSettings()
     settings.endGroup();
 }
 
+void MainWindow::clearLoadedPdks()
+{
+    m_loadedPdks.clear();
+}
+
+QSet<QString> MainWindow::pdkMemberLibraryNames() const
+{
+    QSet<QString> names;
+    for (const DoorPdkInfo &pdk : m_loadedPdks) {
+        for (const DoorPdkLibrary &lib : pdk.libraries) {
+            names.insert(lib.name);
+        }
+    }
+    return names;
+}
+
+const DoorPdkInfo *MainWindow::activePdk() const
+{
+    if (m_loadedPdks.isEmpty()) {
+        return nullptr;
+    }
+    // Prefer PDK that owns the currently selected library.
+    const QString cur = getCurrentLibraryName();
+    if (!cur.isEmpty()) {
+        for (const DoorPdkInfo &pdk : m_loadedPdks) {
+            for (const DoorPdkLibrary &lib : pdk.libraries) {
+                if (lib.name == cur) {
+                    return &pdk;
+                }
+            }
+            if (pdk.name == cur) {
+                return &pdk;
+            }
+        }
+    }
+    return &m_loadedPdks.first();
+}
+
+bool MainWindow::libraryHasIndexedViews(const QString &libName) const
+{
+    if (libName.isEmpty() || !m_properties) {
+        return false;
+    }
+    if (hasWildcardDefineForLibrary(libName)) {
+        return true;
+    }
+    const QString prefix = getLibraryKeyPrefix() + libName + QLatin1Char('/');
+    const QMap<QString, PropertyItem *> propItems = m_properties->getMap();
+    for (auto it = propItems.constBegin(); it != propItems.constEnd(); ++it) {
+        if (it.key().startsWith(prefix)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+void MainWindow::indexPdkLibraryContent(const QString &libName, const QString &libRoot)
+{
+    if (libName.isEmpty() || libRoot.isEmpty() || !m_properties) {
+        return;
+    }
+    // Keep existing ROOM / wildcard design libraries (e.g. converted sg13g2_pr).
+    if (hasWildcardDefineForLibrary(libName)) {
+        return;
+    }
+    {
+        const QString prefix = getLibraryKeyPrefix() + libName + QLatin1Char('/');
+        const QMap<QString, PropertyItem *> propItems = m_properties->getMap();
+        for (auto it = propItems.constBegin(); it != propItems.constEnd(); ++it) {
+            if (!it.key().startsWith(prefix)) {
+                continue;
+            }
+            const QString path = m_properties->get<QString>(it.key());
+            if (path.endsWith(QStringLiteral(".room"), Qt::CaseInsensitive)) {
+                return;
+            }
+        }
+    }
+
+    const QDir root(libRoot);
+    if (!root.exists()) {
+        return;
+    }
+
+    // Open-PDK ref style: libs.ref/<lib>/gds/<lib>.gds
+    // One Cell (file basename) + one view "gds". Hierarchy lives under the expanded
+    // gds node in Views — do NOT duplicate every GDS structure as a Cell.
+    QString gdsPath;
+    const QDir gdsDir(root.filePath(QStringLiteral("gds")));
+    if (gdsDir.exists()) {
+        const QStringList gdsFiles =
+            gdsDir.entryList(QStringList() << QStringLiteral("*.gds") << QStringLiteral("*.GDS"),
+                             QDir::Files,
+                             QDir::Name);
+        if (!gdsFiles.isEmpty()) {
+            gdsPath = gdsDir.filePath(gdsFiles.first());
+        }
+    }
+    if (gdsPath.isEmpty()) {
+        const QStringList gdsFiles =
+            root.entryList(QStringList() << QStringLiteral("*.gds") << QStringLiteral("*.GDS"),
+                           QDir::Files,
+                           QDir::Name);
+        if (!gdsFiles.isEmpty()) {
+            gdsPath = root.filePath(gdsFiles.first());
+        }
+    }
+
+    if (!gdsPath.isEmpty()) {
+        // Drop a previous mistaken per-structure-cell index for this PDK lib.
+        const QString prefix = getLibraryKeyPrefix() + libName + QLatin1Char('/');
+        QStringList toRemove;
+        const QMap<QString, PropertyItem *> propItems = m_properties->getMap();
+        for (auto it = propItems.constBegin(); it != propItems.constEnd(); ++it) {
+            if (it.key().startsWith(prefix)) {
+                toRemove << it.key();
+            }
+        }
+        for (const QString &key : toRemove) {
+            m_properties->remove(key);
+        }
+
+        const QString cellName = QFileInfo(gdsPath).completeBaseName();
+        const QString key =
+            getLibraryKeyPrefix() + libName + QLatin1Char('/') + cellName + QStringLiteral("/gds");
+        m_properties->set(key, QDir::toNativeSeparators(gdsPath));
+
+        // Optional layout siblings only (oas). No lef / cdl / liberty — schematic/symbol/layout.
+        auto addSiblingView = [&](const QString &subdir, const QString &viewName,
+                                  const QStringList &globs) {
+            const QDir sub(root.filePath(subdir));
+            if (!sub.exists()) {
+                return;
+            }
+            const QStringList files = sub.entryList(globs, QDir::Files, QDir::Name);
+            if (files.isEmpty()) {
+                return;
+            }
+            const QString vkey = getLibraryKeyPrefix() + libName + QLatin1Char('/') + cellName
+                + QLatin1Char('/') + viewName;
+            m_properties->set(vkey, QDir::toNativeSeparators(sub.filePath(files.first())));
+        };
+        addSiblingView(QStringLiteral("oas"), QStringLiteral("oas"),
+                       QStringList() << QStringLiteral("*.oas") << QStringLiteral("*.OAS")
+                                     << QStringLiteral("*.oasis"));
+        return;
+    }
+
+    // Schematic example dirs: each *.sch (and *.sym) becomes a cell.
+    const QStringList schFiles = root.entryList(
+        QStringList() << QStringLiteral("*.sch") << QStringLiteral("*.sym")
+                      << QStringLiteral("*.SCH") << QStringLiteral("*.SYM"),
+        QDir::Files,
+        QDir::Name);
+    for (const QString &fileName : schFiles) {
+        const QFileInfo fi(root.filePath(fileName));
+        const QString cell = fi.completeBaseName();
+        if (cell.isEmpty()) {
+            continue;
+        }
+        const QString view = (fi.suffix().compare(QStringLiteral("sym"), Qt::CaseInsensitive) == 0)
+                                 ? QStringLiteral("sym")
+                                 : QStringLiteral("sch");
+        const QString key =
+            getLibraryKeyPrefix() + libName + QLatin1Char('/') + cell + QLatin1Char('/') + view;
+        m_properties->set(key, QDir::toNativeSeparators(fi.absoluteFilePath()));
+    }
+}
+
+bool MainWindow::tryAddDirectoryAsPdk(const QString &dirPath)
+{
+    const QString abs = QDir::cleanPath(dirPath);
+    const QFileInfo desc(QDir(abs).filePath(doorPdkDescriptorFileName()));
+    const bool hasDesc = desc.exists() && desc.isFile();
+    const bool looksOpenPdk = QDir(abs + QStringLiteral("/libs.ref")).exists()
+        && QDir(abs + QStringLiteral("/libs.tech")).exists();
+    if (!hasDesc && !looksOpenPdk) {
+        return false;
+    }
+
+    DoorPdkInfo pdkInfo = loadDoorPdk(abs);
+    if (!pdkInfo.ok) {
+        error(tr("PDK detect failed for '%1': %2").arg(abs, pdkInfo.error), false);
+        return true; // was intended as PDK; don't fall back to plain lib
+    }
+
+    if (pdkInfo.descriptorPath.isEmpty()) {
+        QString writeErr;
+        if (writeDoorPdkDescriptor(pdkInfo, &writeErr)) {
+            pdkInfo.descriptorPath = QDir(pdkInfo.rootPath).filePath(doorPdkDescriptorFileName());
+            info(tr("Wrote %1").arg(pdkInfo.descriptorPath), false);
+        }
+    }
+
+    QString err;
+    if (!registerLoadedPdk(pdkInfo, &err)) {
+        QMessageBox::warning(this, tr("DOOR"), err);
+        return true;
+    }
+
+    loadLibraries();
+    applyPdkTreeGrouping();
+    info(tr("PDK '%1' added (%2 libraries). Tech (agent): layers=%3 DRC=%4 LVS=%5")
+             .arg(pdkInfo.name)
+             .arg(pdkInfo.libraries.size())
+             .arg(pdkInfo.tech.layers.isEmpty() ? tr("(none)") : pdkInfo.tech.layers)
+             .arg(pdkInfo.tech.drc.isEmpty() ? tr("(none)") : pdkInfo.tech.drc)
+             .arg(pdkInfo.tech.lvs.isEmpty() ? tr("(none)") : pdkInfo.tech.lvs),
+         false);
+
+    if (!m_currentProjFile.isEmpty()) {
+        saveProjectFile(m_currentProjFile);
+    } else {
+        setStateChanged();
+    }
+    return true;
+}
+
+bool MainWindow::registerLoadedPdk(const DoorPdkInfo &pdk, QString *errorOut)
+{
+    if (!pdk.ok || pdk.rootPath.isEmpty() || pdk.name.isEmpty()) {
+        if (errorOut) {
+            *errorOut = pdk.error.isEmpty() ? QStringLiteral("Invalid PDK.") : pdk.error;
+        }
+        return false;
+    }
+
+    for (const DoorPdkInfo &existing : m_loadedPdks) {
+        if (existing.name == pdk.name
+            || QDir::cleanPath(existing.rootPath) == QDir::cleanPath(pdk.rootPath)) {
+            if (errorOut) {
+                *errorOut = tr("PDK '%1' is already in the project.").arg(pdk.name);
+            }
+            return false;
+        }
+    }
+
+    DoorPdkInfo stored = pdk;
+    QList<DoorPdkLibrary> visibleLibs;
+    for (const DoorPdkLibrary &lib : pdk.libraries) {
+        if (lib.name.isEmpty() || lib.path.isEmpty()) {
+            continue;
+        }
+        if (lib.name.compare(QStringLiteral("libs.tech"), Qt::CaseInsensitive) == 0
+            || lib.role.compare(QStringLiteral("tech"), Qt::CaseInsensitive) == 0) {
+            continue; // agent-only via pdk.tech
+        }
+
+        if (!libraryHasIndexedViews(lib.name)) {
+            setLibraryRootDirectory(lib.name, lib.path);
+            indexPdkLibraryContent(lib.name, lib.path);
+        }
+        // If a design define() already owns this name (e.g. ROOM sg13g2_pr), keep it —
+        // still show under the PDK group in the tree.
+        visibleLibs.append(lib);
+    }
+    stored.libraries = visibleLibs;
+
+    m_loadedPdks.append(stored);
+    return true;
+}
+
+bool MainWindow::reloadLoadedPdk(const QString &pdkName, QString *errorOut)
+{
+    int idx = -1;
+    for (int i = 0; i < m_loadedPdks.size(); ++i) {
+        if (m_loadedPdks.at(i).name == pdkName) {
+            idx = i;
+            break;
+        }
+    }
+    if (idx < 0) {
+        if (errorOut) {
+            *errorOut = tr("PDK '%1' is not loaded.").arg(pdkName);
+        }
+        return false;
+    }
+
+    const DoorPdkInfo old = m_loadedPdks.at(idx);
+    DoorPdkInfo fresh = loadDoorPdk(old.rootPath, pdkName);
+    if (!fresh.ok) {
+        if (errorOut) {
+            *errorOut = fresh.error.isEmpty() ? tr("Failed to reload PDK.") : fresh.error;
+        }
+        return false;
+    }
+
+    // Drop property keys for libraries that disappeared; re-index new/changed roots.
+    QSet<QString> newNames;
+    for (const DoorPdkLibrary &lib : fresh.libraries) {
+        if (lib.name.compare(QStringLiteral("libs.tech"), Qt::CaseInsensitive) == 0
+            || lib.role.compare(QStringLiteral("tech"), Qt::CaseInsensitive) == 0) {
+            continue;
+        }
+        newNames.insert(lib.name);
+    }
+    for (const DoorPdkLibrary &lib : old.libraries) {
+        if (!newNames.contains(lib.name)) {
+            removeLibraryPropertyKeys(lib.name);
+        }
+    }
+
+    QList<DoorPdkLibrary> visibleLibs;
+    for (const DoorPdkLibrary &lib : fresh.libraries) {
+        if (lib.name.isEmpty() || lib.path.isEmpty()) {
+            continue;
+        }
+        if (lib.name.compare(QStringLiteral("libs.tech"), Qt::CaseInsensitive) == 0
+            || lib.role.compare(QStringLiteral("tech"), Qt::CaseInsensitive) == 0) {
+            continue;
+        }
+        setLibraryRootDirectory(lib.name, lib.path);
+        if (!libraryHasIndexedViews(lib.name)) {
+            indexPdkLibraryContent(lib.name, lib.path);
+        }
+        visibleLibs.append(lib);
+    }
+    fresh.libraries = visibleLibs;
+    m_loadedPdks[idx] = fresh;
+
+    loadLibraries();
+    applyPdkTreeGrouping();
+    setStateChanged();
+    if (!m_currentProjFile.isEmpty()) {
+        saveProjectFile(m_currentProjFile);
+    }
+    return true;
+}
+
+void MainWindow::editPdkDescriptor(const QString &pdkName, const QString &pdkRoot)
+{
+    QString root = QDir::cleanPath(pdkRoot);
+    if (root.isEmpty()) {
+        for (const DoorPdkInfo &pdk : m_loadedPdks) {
+            if (pdk.name == pdkName) {
+                root = pdk.rootPath;
+                break;
+            }
+        }
+    }
+    if (root.isEmpty() || !QFileInfo(root).isDir()) {
+        error(tr("PDK root not found for '%1'.").arg(pdkName), false);
+        return;
+    }
+
+    QString descPath;
+    for (const DoorPdkInfo &pdk : m_loadedPdks) {
+        if (pdk.name == pdkName && !pdk.descriptorPath.isEmpty()) {
+            descPath = pdk.descriptorPath;
+            break;
+        }
+    }
+    if (descPath.isEmpty()) {
+        descPath = QDir(root).filePath(doorPdkDescriptorFileName());
+    }
+
+    if (!QFileInfo::exists(descPath)) {
+        const auto reply = QMessageBox::question(
+            this,
+            tr("PDK Descriptor"),
+            tr("No %1 found under\n%2\n\nCreate one from the current PDK layout?")
+                .arg(doorPdkDescriptorFileName(), QDir::toNativeSeparators(root)),
+            QMessageBox::Yes | QMessageBox::No,
+            QMessageBox::Yes);
+        if (reply != QMessageBox::Yes) {
+            return;
+        }
+        DoorPdkInfo info = loadDoorPdk(root, pdkName);
+        if (!info.ok) {
+            // Fall back to portable template write.
+            QFile f(descPath);
+            if (!f.open(QIODevice::WriteOnly | QIODevice::Truncate | QIODevice::Text)) {
+                error(tr("Cannot create descriptor: %1").arg(f.errorString()), false);
+                return;
+            }
+            f.write(openPdkTemplateJson(pdkName.isEmpty() ? QFileInfo(root).completeBaseName()
+                                                          : pdkName)
+                        .toUtf8());
+        } else {
+            QString writeErr;
+            if (!writeDoorPdkDescriptor(info, &writeErr)) {
+                error(tr("Cannot create descriptor: %1").arg(writeErr), false);
+                return;
+            }
+        }
+        descPath = QDir(root).filePath(doorPdkDescriptorFileName());
+    }
+
+    DoorPdkDescriptorDialog dlg(root, descPath, this);
+    dlg.exec();
+    if (dlg.saved()) {
+        QString err;
+        if (!reloadLoadedPdk(pdkName, &err)) {
+            error(err, false);
+        } else {
+            info(tr("Reloaded PDK '%1' from descriptor.").arg(pdkName), false);
+        }
+    }
+}
+
+void MainWindow::applyPdkTreeGrouping()
+{
+    if (m_loadedPdks.isEmpty()) {
+        return;
+    }
+
+    QMap<QString, QStringList> combined;
+    for (const DoorPdkInfo &pdk : m_loadedPdks) {
+        QStringList childNames;
+        for (const DoorPdkLibrary &lib : pdk.libraries) {
+            childNames << lib.name;
+        }
+        combined.insert(pdk.name, childNames);
+    }
+    loadCombinedLibs(combined);
+
+    // Tag PDK parent nodes for menus / assistant.
+    for (int i = 0; i < m_ui->treeLibs->topLevelItemCount(); ++i) {
+        QTreeWidgetItem *item = m_ui->treeLibs->topLevelItem(i);
+        if (!item || item->childCount() == 0) {
+            continue;
+        }
+        for (const DoorPdkInfo &pdk : m_loadedPdks) {
+            if (item->text(0) != pdk.name) {
+                continue;
+            }
+            item->setData(0, RoleType, ItemPdkRoot);
+            item->setData(0, RolePdkPath, pdk.rootPath);
+            item->setToolTip(0, tr("Technology PDK\n%1").arg(pdk.rootPath));
+            item->setExpanded(true);
+            break;
+        }
+    }
+}
+
+QString MainWindow::resolvePdkRoot() const
+{
+    const DoorPdkInfo *pdk = activePdk();
+    if (!pdk || pdk->rootPath.isEmpty()) {
+        return {};
+    }
+    // Parent of the technology folder (…/IHP-Open-PDK for …/ihp-sg13g2).
+    return QDir::fromNativeSeparators(QFileInfo(pdk->rootPath).absolutePath());
+}
+
+QString MainWindow::resolvePdkName() const
+{
+    const DoorPdkInfo *pdk = activePdk();
+    return pdk ? pdk->name : QString();
+}
+
+QString MainWindow::resolvePdkPath() const
+{
+    const DoorPdkInfo *pdk = activePdk();
+    return pdk ? QDir::fromNativeSeparators(pdk->rootPath) : QString();
+}
+
+QJsonObject MainWindow::buildPdkStateObject() const
+{
+    QJsonObject out;
+    const DoorPdkInfo *pdk = activePdk();
+    const QString path = pdk ? QDir::fromNativeSeparators(pdk->rootPath) : QString();
+    const QString name = pdk ? pdk->name : QString();
+    out.insert(QStringLiteral("pdk"), name);
+    out.insert(QStringLiteral("pdk_path"), path);
+    out.insert(QStringLiteral("pdk_root"), resolvePdkRoot());
+    out.insert(QStringLiteral("configured"), pdk && !path.isEmpty() && QDir(path).exists());
+    out.insert(QStringLiteral("descriptor"),
+               pdk ? pdk->descriptorPath : QString());
+
+    QJsonObject paths;
+    if (pdk) {
+        auto put = [&](const QString &key, const QString &abs) {
+            if (!abs.isEmpty() && QFileInfo::exists(abs)) {
+                paths.insert(key, QDir::fromNativeSeparators(abs));
+            }
+        };
+        put(QStringLiteral("libs_tech"), pdk->tech.root);
+        put(QStringLiteral("libs_tech_klayout"), pdk->tech.klayout);
+        put(QStringLiteral("libs_tech_layers"), pdk->tech.layers);
+        put(QStringLiteral("libs_tech_drc"), pdk->tech.drc);
+        put(QStringLiteral("libs_tech_lvs"), pdk->tech.lvs);
+        put(QStringLiteral("libs_tech_xschem"), pdk->tech.xschem);
+        put(QStringLiteral("libs_tech_ngspice"), pdk->tech.ngspice);
+        put(QStringLiteral("libs_tech_qucs"), pdk->tech.qucs);
+
+        QJsonArray pdkLibs;
+        for (const DoorPdkLibrary &lib : pdk->libraries) {
+            QJsonObject lo;
+            lo.insert(QStringLiteral("name"), lib.name);
+            lo.insert(QStringLiteral("path"), QDir::fromNativeSeparators(lib.path));
+            lo.insert(QStringLiteral("role"), lib.role);
+            pdkLibs.append(lo);
+            if (lib.role == QLatin1String("primitives")) {
+                put(QStringLiteral("libs_ref_pr"), lib.path);
+            } else if (lib.role == QLatin1String("stdcell")) {
+                put(QStringLiteral("libs_ref_stdcell"), lib.path);
+            } else if (lib.role == QLatin1String("io")) {
+                put(QStringLiteral("libs_ref_io"), lib.path);
+            }
+        }
+        out.insert(QStringLiteral("pdk_libraries"), pdkLibs);
+    }
+    out.insert(QStringLiteral("paths"), paths);
+
+    const QString lib = getCurrentLibraryName();
+    QJsonArray techLibs;
+    for (const QString &t : getTechLibraryAttachList(lib)) {
+        techLibs.append(t);
+    }
+    out.insert(QStringLiteral("tech_libraries"), techLibs);
+    return out;
+}
+
+QJsonObject MainWindow::buildTechInfoObject() const
+{
+    QJsonObject out = buildPdkStateObject();
+    out.insert(QStringLiteral("ok"), true);
+
+    // Layer summary from attached tech ROOM libraries (compact — names only).
+    QJsonArray layerSummaries;
+#ifndef LIBMAN_NO_ROOM
+    const QString lib = getCurrentLibraryName();
+    for (const QString &techLib : getTechLibraryAttachList(lib)) {
+        const QStringList roomPaths = resolveTechLibraryCorePaths(techLib);
+        for (const QString &roomPath : roomPaths) {
+            if (!roomPath.endsWith(QStringLiteral(".room"), Qt::CaseInsensitive)) {
+                continue;
+            }
+            try {
+                room::Database db;
+                const room::RoomJsonIo::Result loaded =
+                    room::RoomJsonIo::loadRoomOrJson(roomPath.toStdString(), db);
+                if (!loaded.ok) {
+                    continue;
+                }
+                QJsonObject one;
+                one.insert(QStringLiteral("tech_library"), techLib);
+                one.insert(QStringLiteral("room_path"), roomPath);
+                one.insert(QStringLiteral("file_view"), static_cast<int>(db.fileView()));
+                QJsonArray layers;
+                for (const room::LayerSpec &layer : db.lib().layers()) {
+                    QJsonObject lo;
+                    lo.insert(QStringLiteral("name"), QString::fromStdString(layer.name));
+                    lo.insert(QStringLiteral("layer"), static_cast<int>(layer.layerNum));
+                    lo.insert(QStringLiteral("datatype"), static_cast<int>(layer.dataType));
+                    layers.append(lo);
+                    if (layers.size() >= 64) {
+                        break; // keep MCP payload small
+                    }
+                }
+                one.insert(QStringLiteral("layer_count"),
+                           static_cast<int>(db.lib().layers().size()));
+                one.insert(QStringLiteral("layers"), layers);
+                layerSummaries.append(one);
+            } catch (...) {
+                // Skip unreadable tech rooms.
+            }
+            break; // one room per tech lib is enough for summary
+        }
+    }
+#endif
+    out.insert(QStringLiteral("tech_room_layers"), layerSummaries);
+    if (const DoorPdkInfo *pdk = activePdk()) {
+        QJsonObject tech;
+        tech.insert(QStringLiteral("root"), pdk->tech.root);
+        tech.insert(QStringLiteral("klayout"), pdk->tech.klayout);
+        tech.insert(QStringLiteral("layers"), pdk->tech.layers);
+        tech.insert(QStringLiteral("drc"), pdk->tech.drc);
+        tech.insert(QStringLiteral("lvs"), pdk->tech.lvs);
+        tech.insert(QStringLiteral("xschem"), pdk->tech.xschem);
+        tech.insert(QStringLiteral("ngspice"), pdk->tech.ngspice);
+        tech.insert(QStringLiteral("qucs"), pdk->tech.qucs);
+        out.insert(QStringLiteral("libs_tech"), tech);
+    }
+    out.insert(
+        QStringLiteral("note"),
+        QStringLiteral(
+            "Summary only. PDK comes from project pdk() + .door-pdk.json. "
+            "Use libs_tech (DRC/LVS/layers) and pdk_libraries for layout work. "
+            "Full GDS/ref cell dumps are intentionally omitted."));
+    return out;
+}
+
 void MainWindow::registerAssistantMcpTools()
 {
     if (!m_assistantMcp) {
@@ -3113,8 +3703,10 @@ void MainWindow::registerAssistantMcpTools()
     m_assistantMcp->registerTool(
         QStringLiteral("get_app_state"),
         QStringLiteral(
-            "Current project, library, cell, view, and absolute view_path (*.room for schematic/symbol/layout). "
-            "Never open project_file with room.open — use view_path."),
+            "DOOR MCP tool (not Python): current library/cell/view/view_path. "
+            "Never write room.get_app_state() — that attribute does not exist. "
+            "Prefer LIVE SELECTION / run_python’s injected view_path. "
+            "Never open project_file with room.open — use view_path (*.room)."),
         emptySchema(),
         [this](const QJsonObject &) {
             const QString lib = getCurrentLibraryName();
@@ -3133,8 +3725,21 @@ void MainWindow::registerAssistantMcpTools()
                        m_properties->exists(QStringLiteral("SchematicSymbolFormat"))
                            ? m_properties->get<QString>(QStringLiteral("SchematicSymbolFormat"))
                            : QStringLiteral("ROOM"));
+            const QJsonObject pdk = buildPdkStateObject();
+            for (auto it = pdk.begin(); it != pdk.end(); ++it) {
+                out.insert(it.key(), it.value());
+            }
             return out;
         });
+
+    m_assistantMcp->registerTool(
+        QStringLiteral("get_tech_info"),
+        QStringLiteral(
+            "Technology / PDK summary for the current design library: PDK paths, "
+            "attached tech libraries, and a compact layer table from tech ROOM files. "
+            "Call when the user asks about layers, PDK, or layout generation context."),
+        emptySchema(),
+        [this](const QJsonObject &) { return buildTechInfoObject(); });
 
     {
         QJsonObject schema;
@@ -3243,6 +3848,78 @@ void MainWindow::registerAssistantMcpTools()
         QJsonObject schema;
         schema.insert(QStringLiteral("type"), QStringLiteral("object"));
         QJsonObject props;
+        QJsonObject pathProp;
+        pathProp.insert(QStringLiteral("type"), QStringLiteral("string"));
+        pathProp.insert(QStringLiteral("description"),
+                        QStringLiteral(
+                            "Absolute path to an existing *.layout.room / *.schematic.room / "
+                            "*.symbol.room (or other supported view file) for the current cell. "
+                            "Empty → default <cellDir>/<cell>.layout.room"));
+        props.insert(QStringLiteral("path"), pathProp);
+        QJsonObject viewProp;
+        viewProp.insert(QStringLiteral("type"), QStringLiteral("string"));
+        viewProp.insert(QStringLiteral("description"),
+                        QStringLiteral("View name to register (default: layout)"));
+        props.insert(QStringLiteral("view"), viewProp);
+        schema.insert(QStringLiteral("properties"), props);
+
+        m_assistantMcp->registerTool(
+            QStringLiteral("register_view"),
+            QStringLiteral(
+                "Register an on-disk view file for the currently selected cell so it appears "
+                "in DOOR’s View pane (required after run_python saves a new *.layout.room). "
+                "Does not synthesize geometry — only registers an existing file."),
+            schema,
+            [this](const QJsonObject &args) {
+                const QString lib = getCurrentLibraryName();
+                const QString cell = getCurrentGroupName();
+                if (lib.isEmpty() || cell.isEmpty()) {
+                    return AssistantMcp::errResult(
+                        QStringLiteral("No selected library/cell — select a cell first"));
+                }
+                QString view = args.value(QStringLiteral("view")).toString().trimmed();
+                if (view.isEmpty()) {
+                    view = QStringLiteral("layout");
+                }
+                QString path = args.value(QStringLiteral("path")).toString().trimmed();
+                if (path.isEmpty()) {
+                    const QString libRoot = getLibraryPath(lib);
+                    if (libRoot.isEmpty()) {
+                        return AssistantMcp::errResult(QStringLiteral("Library root path unknown"));
+                    }
+                    const QString cellDir = QDir(libRoot).filePath(cell);
+                    path = isRoomViewName(view) ? roomViewFilePath(cellDir, cell, view)
+                                                : QDir(cellDir).filePath(cell + QLatin1Char('.') + view);
+                }
+                path = QDir::toNativeSeparators(path);
+                if (!QFileInfo::exists(path)) {
+                    return AssistantMcp::errResult(
+                        QStringLiteral("File does not exist (create it first): %1").arg(path));
+                }
+                if (!registerCellViewAtPath(lib, cell, view, path)) {
+                    return AssistantMcp::errResult(
+                        QStringLiteral("Failed to register view '%1' at %2").arg(view, path));
+                }
+                appendPythonLog(QStringLiteral("# register_view"));
+                appendPythonLog(QStringLiteral(">>> # %1 → %2/%3/%4").arg(path, lib, cell, view));
+                QJsonObject out;
+                out.insert(QStringLiteral("ok"), true);
+                out.insert(QStringLiteral("path"), path);
+                out.insert(QStringLiteral("library"), lib);
+                out.insert(QStringLiteral("cell"), cell);
+                out.insert(QStringLiteral("view"), view);
+                out.insert(QStringLiteral("note"),
+                           QStringLiteral(
+                               "View registered in DOOR. Reply that layout/view is now listed — "
+                               "only if this path is a real layout file you created."));
+                return out;
+            });
+    }
+
+    {
+        QJsonObject schema;
+        schema.insert(QStringLiteral("type"), QStringLiteral("object"));
+        QJsonObject props;
         QJsonObject codeProp;
         codeProp.insert(QStringLiteral("type"), QStringLiteral("string"));
         props.insert(QStringLiteral("code"), codeProp);
@@ -3253,6 +3930,8 @@ void MainWindow::registerAssistantMcpTools()
             QStringLiteral("run_python"),
             QStringLiteral(
                 "Run Python in DOOR Command Line (ROOM preloaded). "
+                "DOOR injects view_path/library/cell/view from the current selection — "
+                "do NOT call room.get_app_state (it does not exist). "
                 "Code and stdout/stderr appear only in Messages. "
                 "Use print(...) for results. Returns ok/error only — not the printed data."),
             schema,
@@ -3272,7 +3951,42 @@ void MainWindow::registerAssistantMcpTools()
                         QStringLiteral("Command Line is busy — wait and retry."));
                 }
 
-                // Echo like Virtuoso CIW / Command Line.
+                // Fresh selection for this exec — agents often invent room.get_app_state().
+                const QString lib = getCurrentLibraryName();
+                const QString cell = getCurrentGroupName();
+                const QString view = getCurrentViewName();
+                const QString viewPath = getViewPath(lib, cell, view);
+                const QString pdkRoot = resolvePdkRoot();
+                const QString pdk = resolvePdkName();
+                const QString pdkPath = resolvePdkPath();
+                auto pyStr = [](const QString &s) {
+                    QString t = s;
+                    t.replace(QLatin1Char('\\'), QStringLiteral("\\\\"));
+                    t.replace(QLatin1Char('\''), QStringLiteral("\\'"));
+                    return QStringLiteral("'") + t + QStringLiteral("'");
+                };
+                // Bind selection + PDK vars and a compatibility room.get_app_state() shim
+                // (agents invent that name; real get_app_state is a DOOR MCP tool).
+                const QString preamble =
+                    QStringLiteral(
+                        "view_path = %1\n"
+                        "library = %2\n"
+                        "cell = %3\n"
+                        "view = %4\n"
+                        "pdk_root = %5\n"
+                        "pdk = %6\n"
+                        "pdk_path = %7\n"
+                        "import room as _door_room\n"
+                        "def _door_get_app_state():\n"
+                        "    return {'library': library, 'cell': cell, 'view': view, "
+                        "'view_path': view_path, 'pdk_root': pdk_root, 'pdk': pdk, "
+                        "'pdk_path': pdk_path}\n"
+                        "_door_room.get_app_state = _door_get_app_state\n")
+                        .arg(pyStr(viewPath), pyStr(lib), pyStr(cell), pyStr(view),
+                             pyStr(pdkRoot), pyStr(pdk), pyStr(pdkPath));
+                const QString fullCode = preamble + code;
+
+                // Echo like Virtuoso CIW / Command Line (user code only; skip injected prelude).
                 const QStringList lines = code.split(QLatin1Char('\n'));
                 for (int i = 0; i < lines.size(); ++i) {
                     appendPythonLog((i == 0 ? QStringLiteral(">>> ") : QStringLiteral("... "))
@@ -3293,7 +4007,7 @@ void MainWindow::registerAssistantMcpTools()
                         loop.quit();
                     });
                 timeout.start(60000);
-                m_pythonConsole->execute(code);
+                m_pythonConsole->execute(fullCode);
                 loop.exec();
                 QObject::disconnect(finishedConn);
 
@@ -4359,6 +5073,8 @@ void MainWindow::clearCurrentProjectData()
 
     m_itemText.clear();
     m_currentProjFile.clear();
+    clearLoadedPdks();
+    m_wildcardDefines.clear();
 
     if(m_properties) {
         delete m_properties;

@@ -166,6 +166,8 @@ set(SOURCES
     gds/gdsReadAsync.cpp
     src/libfileparser.cpp
     src/libdefine_utils.cpp
+    src/door_pdk.cpp
+    src/door_pdk_descriptor_dialog.cpp
     oas/oasReadAsync.cpp
     oas/oasReader.cpp
     src/klayout_tools.cpp
@@ -275,6 +277,8 @@ set(HEADERS
     gds/gdsreader.h
     src/libfileparser.h
     src/libdefine_utils.h
+    src/door_pdk.h
+    src/door_pdk_descriptor_dialog.h
     oas/oasReader.h
     src/lstreamcellreader.h
     src/projectmanager.h

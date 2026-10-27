@@ -69,6 +69,8 @@ add_executable(tst_libman_gui
     ${LIBMAN_ROOT}/src/mainwindow.cpp
     ${LIBMAN_ROOT}/src/python_console.cpp
     ${LIBMAN_ROOT}/src/libfileparser.cpp
+    ${LIBMAN_ROOT}/src/door_pdk.cpp
+    ${LIBMAN_ROOT}/src/libdefine_utils.cpp
     ${LIBMAN_ROOT}/src/projectmanager.cpp
     ${LIBMAN_ROOT}/src/projectfile.cpp
     ${LIBMAN_ROOT}/src/property.cpp

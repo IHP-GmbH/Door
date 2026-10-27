@@ -201,6 +201,7 @@ void MainWindow::loadProjectFile(const QString &fileName)
     clearLibraryViewProperties();
     clearAllTechLibraryAttaches();
     m_wildcardDefines.clear();
+    clearLoadedPdks();
 
     const QDir projectDir = QFileInfo(fileName).absoluteDir();
     QSet<QString> loadedLibraries;
@@ -317,7 +318,33 @@ void MainWindow::loadProjectFile(const QString &fileName)
         addTechLibraryAttach(attach.libraryName, attach.techLibraryName);
     }
 
+    for(const LibPdk &pdkEntry : data.pdks) {
+        QString pdkPath = expandShellVariables(pdkEntry.path.trimmed());
+        pdkPath.replace('\\', '/');
+        if (!QDir::isAbsolutePath(pdkPath)) {
+            pdkPath = QDir::toNativeSeparators(projectDir.absoluteFilePath(pdkPath));
+        }
+        DoorPdkInfo pdkInfo = loadDoorPdk(pdkPath, pdkEntry.name);
+        QString err;
+        if (!registerLoadedPdk(pdkInfo, &err)) {
+            error(QString("PDK '%1': %2").arg(pdkEntry.name, err.isEmpty() ? pdkInfo.error : err));
+            continue;
+        }
+        for (const DoorPdkLibrary &lib : pdkInfo.libraries) {
+            loadedLibraries.insert(lib.name);
+        }
+        this->info(QString("PDK '%1' loaded from %2 (%3 libraries)%4")
+                       .arg(pdkInfo.name,
+                            pdkInfo.rootPath,
+                            QString::number(pdkInfo.libraries.size()),
+                            pdkInfo.descriptorPath.isEmpty()
+                                ? QStringLiteral(" [auto-detect]")
+                                : QStringLiteral(" via .door-pdk.json")),
+                   false);
+    }
+
     loadLibraries();
+    applyPdkTreeGrouping();
 
     if (!selectedLib.isEmpty()) {
         for (int i = 0; i < m_ui->treeLibs->topLevelItemCount(); ++i) {
@@ -571,6 +598,7 @@ QList<QPair<QString, QString>> MainWindow::getCurrentProjectEntries() const
     }
 
     QSet<QString> librariesWithViews;
+    const QSet<QString> pdkMembers = pdkMemberLibraryNames();
 
     const QMap<QString, PropertyItem*> propItems = m_properties->getMap();
 
@@ -589,7 +617,7 @@ QList<QPair<QString, QString>> MainWindow::getCurrentProjectEntries() const
         }
 
         const QString libName = tail.left(pos).trimmed();
-        if(libName.isEmpty()) {
+        if(libName.isEmpty() || pdkMembers.contains(libName)) {
             continue;
         }
 
@@ -621,7 +649,7 @@ QList<QPair<QString, QString>> MainWindow::getCurrentProjectEntries() const
         }
 
         const QString libName = tail.trimmed();
-        if (libName.isEmpty() || librariesWithViews.contains(libName)) {
+        if (libName.isEmpty() || librariesWithViews.contains(libName) || pdkMembers.contains(libName)) {
             continue;
         }
 
@@ -746,6 +774,25 @@ bool MainWindow::saveProjectEntriesToFile(const QString &fileName,
             << ", "
             << toLibStringLiteral(storedPath)
             << ");\n";
+    }
+
+    if (!m_loadedPdks.isEmpty()) {
+        out << '\n';
+        const QString baseAbs = QDir::cleanPath(baseDir.absolutePath());
+        for (const DoorPdkInfo &pdk : m_loadedPdks) {
+            const QString abs = QDir::cleanPath(pdk.rootPath);
+            QString storedPath;
+            if (abs.startsWith(baseAbs, Qt::CaseInsensitive)) {
+                storedPath = QDir::toNativeSeparators(baseDir.relativeFilePath(abs));
+            } else {
+                storedPath = QDir::toNativeSeparators(abs);
+            }
+            out << "pdk("
+                << toLibStringLiteral(pdk.name)
+                << ", "
+                << toLibStringLiteral(storedPath)
+                << ");\n";
+        }
     }
 
     const QList<QPair<QString, QString>> attaches = getTechLibraryAttaches();

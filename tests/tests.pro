@@ -38,6 +38,7 @@ SOURCES += \
     $$PWD/../lstream/lstrReadAsync.cpp \
     $$PWD/../src/libfileparser.cpp \
     $$PWD/../src/libdefine_utils.cpp \
+    $$PWD/../src/door_pdk.cpp \
     $$PWD/../src/klayout_tools.cpp \
     $$PWD/../src/klayoutCellResolver.cpp \
     $$PWD/../src/lstreamcellreader.cpp \

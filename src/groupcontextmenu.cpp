@@ -17,9 +17,13 @@
 #include "ui_mainwindow.h"
 
 #include "property.h"
+#include "room_import_service.h"
 #include "gds/gdsreader.h"
 #include "oas/oasReader.h"
 #include "room/room_path_utils.h"
+
+#include <QApplication>
+#include <QEventLoop>
 
 /*!*********************************************************************************************************************
  * \brief Displays menu for group (cell) widget.
@@ -104,6 +108,24 @@ void MainWindow::showGroupMenu(const QPoint &pos)
         connect(groupInfo, &QAction::triggered, this, &MainWindow::showGroupInfo);
         menu->addAction(groupInfo);
         addAction(groupInfo);
+
+        // Only if at least one selected cell has no schematic/symbol ROOM yet
+        // (native xschem/qucs sources still need conversion).
+        bool anyNeedsRoom = false;
+        for (QListWidgetItem *sel : items) {
+            if (sel && !cellHasRoomSchematicOrSymbol(libName, sel->text().trimmed())) {
+                anyNeedsRoom = true;
+                break;
+            }
+        }
+        if (anyNeedsRoom) {
+            QAction *toRoom = new QAction(tr("Convert to &ROOM"), this);
+            toRoom->setStatusTip(tr(
+                "Convert selected cells without ROOM schematic/symbol "
+                "(xschem/qucs sources → ROOM; encoding from Settings)."));
+            connect(toRoom, &QAction::triggered, this, &MainWindow::convertSelectedGroupsToRoom);
+            menu->addAction(toRoom);
+        }
     }
 
     menu->addSeparator();
@@ -272,6 +294,236 @@ void MainWindow::showGroupInfo()
     foreach(const QString &viewName, views) {
         QString groupPath = QDir::toNativeSeparators(libPath + "/" + viewName + "/" + groupName + "." + viewName);
         showFolderInfo("Cell", groupName, groupPath, false);
+    }
+}
+
+bool MainWindow::cellHasRoomSchematicOrSymbol(const QString &libName, const QString &cellName) const
+{
+    if (libName.isEmpty() || cellName.isEmpty()) {
+        return false;
+    }
+
+    auto isRoomFile = [](const QString &path) {
+        return !path.isEmpty() && QFileInfo::exists(path)
+            && path.endsWith(QStringLiteral(".room"), Qt::CaseInsensitive);
+    };
+
+    for (const QString &view : {QStringLiteral("schematic"), QStringLiteral("symbol")}) {
+        if (isRoomFile(getViewPath(libName, cellName, view))) {
+            return true;
+        }
+    }
+
+    // Also accept sch/sym keys that already point at *.room (unusual but possible).
+    for (const QString &view : {QStringLiteral("sch"), QStringLiteral("sym")}) {
+        if (isRoomFile(getViewPath(libName, cellName, view))) {
+            return true;
+        }
+    }
+
+    const QString libRoot = getLibraryPath(libName);
+    if (!libRoot.isEmpty()) {
+        const QDir cellDir(QDir(libRoot).filePath(cellName));
+        if (cellDir.exists()) {
+            if (isRoomFile(roomViewFilePath(cellDir.absolutePath(), cellName, QStringLiteral("schematic")))
+                || isRoomFile(roomViewFilePath(cellDir.absolutePath(), cellName, QStringLiteral("symbol")))) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+/*!*********************************************************************************************************************
+ * \brief Converts schematic/symbol sources of selected cells to ROOM (binary or JSON from Settings).
+ **********************************************************************************************************************/
+void MainWindow::convertSelectedGroupsToRoom()
+{
+    const QString libName = getCurrentLibraryName();
+    if (libName.isEmpty()) {
+        error(tr("No library selected."), false);
+        return;
+    }
+
+    const QList<QListWidgetItem *> items = m_ui->listGroups->selectedItems();
+    if (items.isEmpty()) {
+        error(tr("Select one or more cells."), false);
+        return;
+    }
+
+    QString encoding = QStringLiteral("ROOM");
+    if (m_properties && m_properties->exists(QStringLiteral("SchematicSymbolFormat"))) {
+        encoding = m_properties->get<QString>(QStringLiteral("SchematicSymbolFormat")).trimmed().toUpper();
+    }
+    const bool wantJson = (encoding == QLatin1String("JSON"));
+
+    info(tr("Convert to ROOM (%1 encoding): %2 cell(s) in '%3'…")
+             .arg(wantJson ? QStringLiteral("JSON") : QStringLiteral("binary"),
+                  QString::number(items.size()),
+                  libName),
+         true);
+
+    // Native sources: anything that is not already *.room (xschem .sch/.sym, qucs .sch, …).
+    const auto isConvertibleSource = [](const QString &path) -> bool {
+        if (path.isEmpty() || !QFileInfo::exists(path)) {
+            return false;
+        }
+        if (path.endsWith(QStringLiteral(".room"), Qt::CaseInsensitive)) {
+            return false;
+        }
+        const QString suffix = QFileInfo(path).suffix().trimmed().toLower();
+        return suffix == QLatin1String("sch") || suffix == QLatin1String("sym")
+            || suffix == QLatin1String("qsch");
+    };
+
+    const auto detectFormat = [](const QString &path) -> CoreImportService::Format {
+        const QString norm = QDir::fromNativeSeparators(path).toLower();
+        const QString suffix = QFileInfo(path).suffix().trimmed().toLower();
+        if (suffix == QLatin1String("sym")) {
+            // Qucs also has .sym under libs.tech/qucs-s/symbols — prefer path hint.
+            if (norm.contains(QStringLiteral("/qucs")) || norm.contains(QStringLiteral("qucs-s"))) {
+                return CoreImportService::Format::Qucs;
+            }
+            return CoreImportService::Format::Xschem;
+        }
+        if (norm.contains(QStringLiteral("/qucs")) || norm.contains(QStringLiteral("qucs-s"))
+            || norm.contains(QStringLiteral("qucs-examples"))) {
+            return CoreImportService::Format::Qucs;
+        }
+        return CoreImportService::Format::Xschem;
+    };
+
+    QStringList xschemSources;
+    QStringList qucsSources;
+    int skippedCells = 0;
+
+    for (QListWidgetItem *item : items) {
+        if (!item) {
+            continue;
+        }
+        const QString cell = item->text().trimmed();
+        if (cell.isEmpty()) {
+            continue;
+        }
+
+        if (cellHasRoomSchematicOrSymbol(libName, cell)) {
+            info(tr("  skip %1 — already has ROOM schematic/symbol").arg(cell), false);
+            ++skippedCells;
+            continue;
+        }
+
+        QStringList cellSources;
+        for (const QString &view : {QStringLiteral("sch"), QStringLiteral("sym"),
+                                    QStringLiteral("schematic"), QStringLiteral("symbol")}) {
+            const QString path = getViewPath(libName, cell, view);
+            if (!isConvertibleSource(path)) {
+                continue;
+            }
+            if (!cellSources.contains(path)) {
+                cellSources << path;
+            }
+        }
+
+        // Flat PDK example dirs: <libRoot>/<cell>.sch next to indexed views.
+        if (cellSources.isEmpty()) {
+            const QString libRoot = getLibraryPath(libName);
+            if (!libRoot.isEmpty()) {
+                const QDir root(libRoot);
+                for (const QString &ext : {QStringLiteral("sch"), QStringLiteral("sym"),
+                                          QStringLiteral("qsch")}) {
+                    const QString candidate = root.filePath(cell + QLatin1Char('.') + ext);
+                    if (isConvertibleSource(candidate) && !cellSources.contains(candidate)) {
+                        cellSources << candidate;
+                    }
+                }
+            }
+        }
+
+        if (cellSources.isEmpty()) {
+            info(tr("  skip %1 — no convertible schematic/symbol source").arg(cell), false);
+            ++skippedCells;
+            continue;
+        }
+
+        for (const QString &src : cellSources) {
+            if (detectFormat(src) == CoreImportService::Format::Qucs) {
+                if (!qucsSources.contains(src)) {
+                    qucsSources << src;
+                }
+            } else if (!xschemSources.contains(src)) {
+                xschemSources << src;
+            }
+        }
+    }
+
+    if (xschemSources.isEmpty() && qucsSources.isEmpty()) {
+        error(tr("Nothing to convert (no schematic/symbol sources on selection)."), false);
+        return;
+    }
+
+    CoreImportService service(this);
+    const CoreImportService::LogCallback logCb = [this](const QString &line) {
+        info(line, false);
+        QApplication::processEvents(QEventLoop::ExcludeUserInputEvents);
+    };
+
+    QVector<CoreImportService::ImportItemResult> results;
+    if (!xschemSources.isEmpty()) {
+        info(tr("Running xschem_to_room on %1 file(s)…").arg(xschemSources.size()), false);
+        results += service.importFiles(CoreImportService::Format::Xschem,
+                                       libName,
+                                       xschemSources,
+                                       /*overwriteExisting=*/true,
+                                       logCb);
+    }
+    if (!qucsSources.isEmpty()) {
+        info(tr("Running qucs_to_room on %1 file(s)…").arg(qucsSources.size()), false);
+        results += service.importFiles(CoreImportService::Format::Qucs,
+                                       libName,
+                                       qucsSources,
+                                       /*overwriteExisting=*/true,
+                                       logCb);
+    }
+
+    int ok = 0;
+    int fail = 0;
+    for (const CoreImportService::ImportItemResult &r : results) {
+        if (r.success) {
+            ++ok;
+            info(tr("  OK %1 → %2")
+                     .arg(QDir::toNativeSeparators(r.sourcePath),
+                          QDir::toNativeSeparators(r.destinationPath)),
+                 false);
+            if (wantJson && !r.destinationPath.isEmpty()) {
+                if (convertRoomViewToJson(r.destinationPath)) {
+                    info(tr("  encoded as JSON: %1")
+                             .arg(QDir::toNativeSeparators(r.destinationPath)),
+                         false);
+                }
+            }
+        } else {
+            ++fail;
+            error(tr("  FAIL %1: %2")
+                      .arg(QDir::toNativeSeparators(r.sourcePath), r.message),
+                  false);
+        }
+    }
+
+    info(tr("Convert to ROOM finished: %1 ok, %2 failed, %3 cells skipped.")
+             .arg(ok)
+             .arg(fail)
+             .arg(skippedCells),
+         false);
+
+    if (!m_currentProjFile.isEmpty()) {
+        saveProjectFile(m_currentProjFile);
+    } else {
+        setStateChanged();
+    }
+
+    const QString currentCell = getCurrentGroupName();
+    if (!currentCell.isEmpty()) {
+        loadViews(libName, currentCell);
     }
 }
 

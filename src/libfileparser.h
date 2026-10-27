@@ -44,12 +44,22 @@ struct LibAttach
     int                             sourceLine = -1;
 };
 
+// pdk(name, path) — Open-PDK / technology root; Door expands via .door-pdk.json (or auto-detect)
+struct LibPdk
+{
+    QString                         name;
+    QString                         path;
+    QString                         sourceFile;
+    int                             sourceLine = -1;
+};
+
 // Result of parsing a .lib file tree
 struct LibFileData
 {
     QList<LibDefinition>            definitions;
     QList<LibInclude>               includes;
     QList<LibAttach>                attaches;
+    QList<LibPdk>                   pdks;
 };
 
 class LibFileParser
@@ -84,6 +94,9 @@ private:
     bool                    parseAttachCall(const QString& argsText,
                          const QString& fileName,
                          int lineNumber);
+    bool                    parsePdkCall(const QString& argsText,
+                      const QString& fileName,
+                      int lineNumber);
 
     QList<Statement>        splitStatements(const QString& text) const;
     QString                 stripComments(const QString& text) const;

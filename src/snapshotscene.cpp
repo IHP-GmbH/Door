@@ -511,12 +511,36 @@ SnapshotScene loadCoreSnapshot(const QString &corePath,
         scene.message = QStringLiteral("No file for this view");
         return scene;
     }
+
+    // Snapshot draws ROOM (and ROOM JSON). Native .sch/.sym/.gds/… are not ROOM.
+    {
+        const QString fileName = QFileInfo(corePath).fileName();
+        const bool isRoom = fileName.endsWith(QStringLiteral(".room"), Qt::CaseInsensitive);
+        const bool isRoomJson = fileName.endsWith(QStringLiteral(".json"), Qt::CaseInsensitive)
+            && (fileName.contains(QStringLiteral(".schematic."), Qt::CaseInsensitive)
+                || fileName.contains(QStringLiteral(".symbol."), Qt::CaseInsensitive)
+                || fileName.contains(QStringLiteral(".layout."), Qt::CaseInsensitive)
+                || fileName.contains(QStringLiteral(".emmodel."), Qt::CaseInsensitive));
+        if (!isRoom && !isRoomJson) {
+            scene.message = QStringLiteral("Not a ROOM file");
+            return scene;
+        }
+    }
+
     try {
         SnapshotBuilder builder(symbolPathForCell);
         builder.drawFile(corePath, viewTypeForSnapshot(viewName), cellName);
         scene = builder.scene;
     } catch (const std::exception &error) {
-        scene.message = QString::fromUtf8(error.what());
+        const QString what = QString::fromUtf8(error.what());
+        // Cap'n Proto noise when a non-ROOM payload was forced through the loader.
+        if (what.contains(QStringLiteral("capnp"), Qt::CaseInsensitive)
+            || what.contains(QStringLiteral("too many segments"), Qt::CaseInsensitive)
+            || what.contains(QStringLiteral("firstWord"), Qt::CaseInsensitive)) {
+            scene.message = QStringLiteral("Not a ROOM file");
+        } else {
+            scene.message = what;
+        }
     }
 #else
     Q_UNUSED(corePath);

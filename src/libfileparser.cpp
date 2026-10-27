@@ -16,6 +16,7 @@ void LibFileParser::clear()
     m_data.definitions.clear();
     m_data.includes.clear();
     m_data.attaches.clear();
+    m_data.pdks.clear();
     m_errorString.clear();
     m_activeFiles.clear();
     m_parsedFiles.clear();
@@ -194,6 +195,10 @@ bool LibFileParser::parseStatement(const Statement& stmt, const QString& fileNam
 
     if(funcName == "attach") {
         return parseAttachCall(argsText, fileName, stmt.lineNumber);
+    }
+
+    if(funcName == "pdk") {
+        return parsePdkCall(argsText, fileName, stmt.lineNumber);
     }
 
     setError(fileName, stmt.lineNumber,
@@ -443,6 +448,48 @@ bool LibFileParser::parseAttachCall(const QString& argsText,
     attach.sourceFile = fileName;
     attach.sourceLine = lineNumber;
     m_data.attaches.append(attach);
+    return true;
+}
+
+/*!******************************************************************************************************************
+ * \brief Parses pdk(name, path) — technology / Open-PDK root reference.
+ *******************************************************************************************************************/
+bool LibFileParser::parsePdkCall(const QString& argsText,
+                                 const QString& fileName,
+                                 int lineNumber)
+{
+    const QStringList args = splitTopLevel(argsText, ',');
+    if(args.size() != 2) {
+        setError(fileName, lineNumber,
+                 QString("pdk() expects exactly 2 arguments, got %1.").arg(args.size()));
+        return false;
+    }
+
+    QString name;
+    QString rawPath;
+    if(!parseStringLiteral(args[0].trimmed(), name)) {
+        setError(fileName, lineNumber,
+                 QString("pdk() first argument must be a string literal (PDK name)."));
+        return false;
+    }
+    if(!parseStringLiteral(args[1].trimmed(), rawPath)) {
+        setError(fileName, lineNumber,
+                 QString("pdk() second argument must be a string literal (PDK path)."));
+        return false;
+    }
+
+    name = name.trimmed();
+    if(name.isEmpty()) {
+        setError(fileName, lineNumber, QString("pdk() name must not be empty."));
+        return false;
+    }
+
+    LibPdk pdk;
+    pdk.name = name;
+    pdk.path = resolvePathRelativeToFile(fileName, rawPath);
+    pdk.sourceFile = fileName;
+    pdk.sourceLine = lineNumber;
+    m_data.pdks.append(pdk);
     return true;
 }
 
