@@ -39,6 +39,7 @@ SOURCES += \
     $$PWD/../src/libfileparser.cpp \
     $$PWD/../src/libdefine_utils.cpp \
     $$PWD/../src/door_pdk.cpp \
+    $$PWD/../src/door_pdk_descriptor_dialog.cpp \
     $$PWD/../src/klayout_tools.cpp \
     $$PWD/../src/klayoutCellResolver.cpp \
     $$PWD/../src/lstreamcellreader.cpp \
@@ -126,6 +127,8 @@ SOURCES += \
 HEADERS += \
     $$PWD/tst_libman_gui.h \
     $$PWD/../src/mainwindow.h \
+    $$PWD/../src/door_pdk.h \
+    $$PWD/../src/door_pdk_descriptor_dialog.h \
     $$PWD/../src/assistant/assistantmcp.h \
     $$PWD/../src/assistant/assistantagent.h \
     $$PWD/../src/assistant/assistantchatpanel.h \

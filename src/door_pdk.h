@@ -44,20 +44,20 @@ struct DoorPdkInfo
 /*!
  * Load PDK layout from \a pdkRoot.
  * Prefer `.door-pdk.json` when present; otherwise auto-detect Open-PDK layout
- * (`libs.ref/*`, `libs.tech/...`).
+ * (e.g. libs.ref/<lib>, libs.tech/...).
  * \a preferredName overrides the display/id name when non-empty.
  */
 DoorPdkInfo loadDoorPdk(const QString &pdkRoot, const QString &preferredName = QString());
 
 /*!
- * Write a portable `.door-pdk.json` (glob rules like libs.ref/*, empty exceptions,
- * relative tech paths). Does not hard-code cell-library names.
+ * Write a portable `.door-pdk.json` (glob rules like libs.ref/<name>, empty
+ * exceptions, relative tech paths). Does not hard-code cell-library names.
  */
 bool writeDoorPdkDescriptor(const DoorPdkInfo &info, QString *errorOut = nullptr);
 
 /*!
  * Portable Open-PDK descriptor skeleton:
- * libraries: [{ "path": "libs.ref/*" }, …], exceptions: [] (user fills exclusions).
+ * libraries: [{ "path": "libs.ref/<name>" }, …], exceptions: [] (user fills exclusions).
  * Drop next to libs.ref / libs.tech; names come from directories on disk.
  */
 QString openPdkTemplateJson(const QString &pdkName = QString());
