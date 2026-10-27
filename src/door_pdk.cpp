@@ -47,6 +47,33 @@ bool looksLikeLibraryDir(const QString &absPath)
                              QDir::Files | QDir::Dirs).isEmpty();
 }
 
+/*! True if the folder has schematic/symbol views (not plots/scripts/simulations dumps). */
+bool looksLikeSchematicOrSymbolDir(const QString &absPath)
+{
+    const QDir libDir(absPath);
+    if (!libDir.entryList(QStringList() << QStringLiteral("*.sch") << QStringLiteral("*.sym")
+                                        << QStringLiteral("*.schematic.room")
+                                        << QStringLiteral("*.symbol.room"),
+                          QDir::Files)
+             .isEmpty()) {
+        return true;
+    }
+    // Cell-style subfolders: <cell>/<cell>.sch|sym|*.room
+    const QFileInfoList subs =
+        libDir.entryInfoList(QDir::Dirs | QDir::NoDotAndDotDot, QDir::Name);
+    for (const QFileInfo &sub : subs) {
+        const QDir cell(sub.absoluteFilePath());
+        if (!cell.entryList(QStringList() << QStringLiteral("*.sch") << QStringLiteral("*.sym")
+                                          << QStringLiteral("*.schematic.room")
+                                          << QStringLiteral("*.symbol.room"),
+                            QDir::Files)
+                 .isEmpty()) {
+            return true;
+        }
+    }
+    return false;
+}
+
 bool isScratchDirName(const QString &n)
 {
     return n.startsWith(QLatin1Char('.'))
@@ -221,7 +248,7 @@ DoorPdkInfo autoDetectOpenPdk(const QString &root, const QString &name)
     const auto xschemMatches =
         expandPathPattern(info.rootPath, QStringLiteral("libs.tech/xschem/*"));
     for (const auto &m : xschemMatches) {
-        if (isScratchDirName(m.first) || !looksLikeLibraryDir(m.second)) {
+        if (isScratchDirName(m.first) || !looksLikeSchematicOrSymbolDir(m.second)) {
             continue;
         }
         addLibIfDir(&info.libraries, &seen, m.first, m.second, QStringLiteral("schematic"));
@@ -306,16 +333,21 @@ DoorPdkInfo loadFromDescriptor(const QString &root, const QString &descPath, con
             if (name.compare(QStringLiteral("libs.tech"), Qt::CaseInsensitive) == 0) {
                 continue;
             }
-            // Under libs.ref prefer library-looking dirs; under tech examples keep sch/sym dirs.
+            // libs.ref/* → PDK cell libs; libs.tech/* globs → only schematic/symbol trees
+            // (skip simulations/, scripts/, plot dumps, …).
             const bool underRef = QDir::fromNativeSeparators(rel)
                                       .startsWith(QStringLiteral("libs.ref/"));
-            if (underRef && !looksLikeLibraryDir(abs)) {
-                continue;
-            }
-            if (!underRef && !looksLikeLibraryDir(abs) && !dirExists(abs)) {
-                continue;
-            }
             const QString role = ruleRole.isEmpty() ? inferRoleFromName(name) : ruleRole;
+            const bool wantSchematic =
+                !underRef
+                || role.compare(QStringLiteral("schematic"), Qt::CaseInsensitive) == 0;
+            if (underRef && !wantSchematic) {
+                if (!looksLikeLibraryDir(abs)) {
+                    continue;
+                }
+            } else if (!looksLikeSchematicOrSymbolDir(abs)) {
+                continue;
+            }
             addLibIfDir(&info.libraries, &seen, name, abs, role);
         }
     }

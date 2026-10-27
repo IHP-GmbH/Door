@@ -3504,6 +3504,7 @@ void MainWindow::applyPdkTreeGrouping()
         for (const DoorPdkLibrary &lib : pdk.libraries) {
             childNames << lib.name;
         }
+        childNames.sort(Qt::CaseInsensitive);
         combined.insert(pdk.name, childNames);
     }
     loadCombinedLibs(combined);
