@@ -29,11 +29,9 @@
   <600 310 600 350 "" 0 0 0 "">
 </Wires>
 <Diagrams>
-  <Rect 720 400 360 280 3 #c0c0c0 1 00 1 1e+08 1e+09 1e+11 0 -80 10 10 1 -1 0.5 1 315 0 225 1 0 0 "Frequency" "dB" "">
-	<"ac.s11_db" #0000ff 1 3 0 0 0>
-	<"ac.s21_db" #ff0000 1 3 0 0 0>
-	<"ac.s22_db" #00aa00 1 3 0 0 0>
-  </Rect>
+  <Smith 720 400 360 280 3 #c0c0c0 1 00 1 0 1 1 1 0 4 1 1 0 1 1 315 0 225 1 0 0 "" "" "">
+	<"ngspice/ac.s_2_1" #0000ff 1 3 0 0 0 0>
+  </Smith>
 </Diagrams>
 <Paintings>
   <Text 350 40 14 #000000 0 "cmim_2u3_tm1fix lookalike (EMTest)">

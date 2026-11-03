@@ -29,6 +29,9 @@ define("Qucs_examples", "Qucs_examples");
 define("analogLib", "analogLib");
 define("commonLib", "commonLib");
 define("ihp_ota1336", "OTA1336");
+define("wafer", "..\\..\\data\\bench-t623\\wafer.gds");
+define("wafer", "..\\..\\data\\bench-t623\\wafer.oas");
+define("wafer", "..\\..\\data\\bench-t623\\wafer.layout.room");
 
 pdk("ihp-sg13g2", "C:\\Work\\PDK\\IHP-Open-PDK\\ihp-sg13g2");
 
