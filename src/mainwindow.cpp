@@ -31,12 +31,18 @@
 #include <QStandardPaths>
 #include <QRegularExpression>
 #include <QSplitter>
+#include <QHash>
+#include <QMap>
 
 #include <QListWidgetItem>
 #include <QVBoxLayout>
 
 #include "snapshotview.h"
+#include "snapshotscene.h"
 #include "python_console.h"
+
+#include <QtConcurrent/QtConcurrent>
+#include <QFutureWatcher>
 
 #if QT_VERSION >= 0x050000
 #include <QScreen>
@@ -1338,11 +1344,28 @@ QString MainWindow::layoutPathForKLayout(const QString &viewName,
 
 namespace {
 
+void fillSnapshotChildCounts(LayoutHierarchySnapshot &snapshot,
+                             const QMap<QString, QStringList> &children)
+{
+    for (auto it = children.constBegin(); it != children.constEnd(); ++it) {
+        snapshot.childCounts.insert(it.key(), it.value().size());
+    }
+}
+
+void fillSnapshotChildCounts(LayoutHierarchySnapshot &snapshot,
+                             const QHash<QString, QStringList> &children)
+{
+    for (auto it = children.constBegin(); it != children.constEnd(); ++it) {
+        snapshot.childCounts.insert(it.key(), it.value().size());
+    }
+}
+
 LayoutHierarchySnapshot snapshotFromGds(const GdsReader::GdsHierarchy &hierarchy)
 {
     LayoutHierarchySnapshot snapshot;
     snapshot.topCells = hierarchy.topCells;
     snapshot.allCells = hierarchy.allCells;
+    fillSnapshotChildCounts(snapshot, hierarchy.children);
     return snapshot;
 }
 
@@ -1351,6 +1374,7 @@ LayoutHierarchySnapshot snapshotFromOas(const LayoutHierarchy &hierarchy)
     LayoutHierarchySnapshot snapshot;
     snapshot.topCells = hierarchy.topCells;
     snapshot.allCells = hierarchy.allCells;
+    fillSnapshotChildCounts(snapshot, hierarchy.children);
     return snapshot;
 }
 
@@ -1359,6 +1383,7 @@ LayoutHierarchySnapshot snapshotFromCore(const RoomCellReader::CoreHierarchy &hi
     LayoutHierarchySnapshot snapshot;
     snapshot.topCells = hierarchy.topCells;
     snapshot.allCells = hierarchy.allCells;
+    fillSnapshotChildCounts(snapshot, hierarchy.children);
     return snapshot;
 }
 
@@ -1371,6 +1396,15 @@ LayoutHierarchySnapshot snapshotFromLStream(const QStringList &cellNames)
         snapshot.allCells.insert(name);
     }
     return snapshot;
+}
+
+QString layoutFileStemHint(const QString &layoutPath)
+{
+    QString stem = QFileInfo(layoutPath).completeBaseName();
+    if (stem.endsWith(QLatin1String(".layout"), Qt::CaseInsensitive)) {
+        stem.chop(7);
+    }
+    return stem;
 }
 
 } // namespace
@@ -1430,7 +1464,7 @@ QString MainWindow::preferredKLayoutCellForRoot(const QString &layoutPath,
         return QString();
     }
 
-    return resolveKLayoutRootCell(snapshot, groupName);
+    return resolveKLayoutRootCell(snapshot, groupName, layoutFileStemHint(layoutPath));
 }
 
 bool MainWindow::isLayoutViewTreeItem(QTreeWidgetItem *item) const
@@ -4618,6 +4652,29 @@ void MainWindow::refreshSnapshot()
         return symbolCoreForCell(name);
     };
 
+    // Layout ROOM may be huge: decode one cell (+ shallow hierarchy) off the UI thread.
+    const auto startAsyncLayoutSnapshot = [this, symbolResolver](const QString &path,
+                                                                const QString &cellName) {
+        m_snapshotView->clearScene(tr("Loading snapshot…"));
+        const quint64 requestId = ++m_snapshotRequestId;
+        auto *watcher = new QFutureWatcher<SnapshotScene>(this);
+        connect(watcher, &QFutureWatcher<SnapshotScene>::finished, this,
+                [this, watcher, requestId]() {
+                    const SnapshotScene scene = watcher->result();
+                    watcher->deleteLater();
+                    if (requestId != m_snapshotRequestId || m_snapshotView == nullptr) {
+                        return;
+                    }
+                    if (!m_ui->groupSnapshot->isVisible()) {
+                        return;
+                    }
+                    m_snapshotView->setScene(scene);
+                });
+        watcher->setFuture(QtConcurrent::run([path, cellName, symbolResolver]() {
+            return loadCoreSnapshot(path, QStringLiteral("layout"), symbolResolver, cellName);
+        }));
+    };
+
     // emmodel: preview the frozen ROOM layout from topology.layoutPath (layout_room).
     if (isEmModel) {
         if (viewPath.isEmpty() || !QFileInfo::exists(viewPath)) {
@@ -4635,8 +4692,7 @@ void MainWindow::refreshSnapshot()
         if (topCell.isEmpty()) {
             topCell = getCurrentGroupName();
         }
-        m_snapshotView->setScene(
-            loadCoreSnapshot(layoutRoom, QStringLiteral("layout"), symbolResolver, topCell));
+        startAsyncLayoutSnapshot(layoutRoom, topCell);
         return;
     }
 
@@ -4648,8 +4704,7 @@ void MainWindow::refreshSnapshot()
             m_snapshotView->clearScene(tr("No ROOM layout view for this cell"));
             return;
         }
-        m_snapshotView->setScene(loadCoreSnapshot(
-            layoutPath, QStringLiteral("layout"), symbolResolver, getCurrentGroupName()));
+        startAsyncLayoutSnapshot(layoutPath, getCurrentGroupName());
         return;
     }
 
@@ -4663,6 +4718,11 @@ void MainWindow::refreshSnapshot()
         focusCell = item->data(0, RoleCellName).toString();
     } else if (isLayout) {
         focusCell = getCurrentGroupName();
+    }
+
+    if (isLayout) {
+        startAsyncLayoutSnapshot(viewPath, focusCell);
+        return;
     }
 
     m_snapshotView->setScene(loadCoreSnapshot(viewPath, view, symbolResolver, focusCell));

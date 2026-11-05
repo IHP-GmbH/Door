@@ -2,8 +2,10 @@
 
 #include "room_paths.h"
 #include "database.h"
+#include "file_summary.h"
 #include "room_json_io.h"
 
+#include <QFileInfo>
 #include <QString>
 #include <stdexcept>
 
@@ -58,6 +60,40 @@ void RoomCellReader::coreCreate(const QString &cellName, const QString &viewName
 bool RoomCellReader::readHierarchy(CoreHierarchy &out)
 {
     try {
+        const QString lower = m_fileName.toLower();
+        const bool likelyJson = lower.endsWith(QLatin1String(".json"))
+            || QFileInfo(m_fileName).suffix().compare(QLatin1String("json"), Qt::CaseInsensitive) == 0;
+
+        // Binary .room: sniff Cap'n Proto names/index only (no geometry decode).
+        if (!likelyJson) {
+            const room::RoomHierarchyInfo hier =
+                room::sniffRoomHierarchy(m_fileName.toStdString());
+            for (const std::string &top : hier.topCells) {
+                const QString name = QString::fromStdString(top);
+                out.topCells << name;
+                out.allCells.insert(name);
+            }
+            for (const std::string &cell : hier.allCells) {
+                out.allCells.insert(QString::fromStdString(cell));
+            }
+            for (const auto &kv : hier.childRefs) {
+                QStringList children;
+                children.reserve(static_cast<int>(kv.second.size()));
+                for (const std::string &ch : kv.second) {
+                    children << QString::fromStdString(ch);
+                }
+                out.children.insert(QString::fromStdString(kv.first), children);
+            }
+            if (out.topCells.isEmpty()) {
+                for (const QString &name : out.allCells) {
+                    out.topCells << name;
+                }
+                out.topCells.sort();
+            }
+            return true;
+        }
+
+        // JSON twin / room-json: full parse (small files).
         room::Database db;
         const room::RoomJsonIo::Result loaded =
             room::RoomJsonIo::loadRoomOrJson(m_fileName.toStdString(), db);

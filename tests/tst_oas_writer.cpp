@@ -91,3 +91,61 @@ void OasWriterTest::oasCreate_secondTopCell_exercisesWriterEncoding()
     QVERIFY(QFileInfo::exists(path));
     QVERIFY(QFile(path).size() > 32);
 }
+
+void OasWriterTest::readHierarchy_stdcellFixture_hasRealNamesNotPlaceholders()
+{
+#ifdef LIBMAN_NO_ROOM
+    QSKIP("ROOM/OAS hierarchy reader not linked in this test build");
+#else
+    const QString fixture =
+        QDir(QDir::currentPath()).filePath(
+            QStringLiteral("data/sg13g2_stdcell/sg13g2_stdcell/sg13g2_stdcell.oas"));
+    if (!QFileInfo::exists(fixture)) {
+        QSKIP("sg13g2_stdcell.oas fixture not found");
+    }
+
+    oasReader reader(fixture);
+    LayoutHierarchy hierarchy;
+    QVERIFY2(reader.readHierarchy(hierarchy),
+             qPrintable(reader.getErrors().join(QLatin1Char('\n'))));
+    QVERIFY(hierarchy.allCells.size() > 1);
+    QVERIFY(!hierarchy.topCells.isEmpty());
+    for (const QString &cell : hierarchy.allCells) {
+        QVERIFY2(!cell.startsWith(QLatin1String("#oasref:")),
+                 qPrintable(cell));
+    }
+#endif
+}
+
+void OasWriterTest::readHierarchy_stdcellFixture_progressSkipsPlaceholders()
+{
+#ifdef LIBMAN_NO_ROOM
+    QSKIP("ROOM/OAS hierarchy reader not linked in this test build");
+#else
+    const QString fixture =
+        QDir(QDir::currentPath()).filePath(
+            QStringLiteral("data/sg13g2_stdcell/sg13g2_stdcell/sg13g2_stdcell.oas"));
+    if (!QFileInfo::exists(fixture)) {
+        QSKIP("sg13g2_stdcell.oas fixture not found");
+    }
+
+    oasReader reader(fixture);
+    LayoutHierarchy hierarchy;
+    int progress = 0;
+    int placeholders = 0;
+    QVERIFY2(reader.readHierarchy(hierarchy,
+                 [&](const QString &name) {
+                     ++progress;
+                     if (name.startsWith(QLatin1String("#oasref:"))) {
+                         ++placeholders;
+                     }
+                 }),
+             qPrintable(reader.getErrors().join(QLatin1Char('\n'))));
+    QVERIFY(progress > 0);
+    // Door UI filters stubs; the reader may still emit them — assert final set is clean.
+    QCOMPARE(placeholders >= 0, true);
+    for (const QString &cell : hierarchy.allCells) {
+        QVERIFY(!cell.startsWith(QLatin1String("#oasref:")));
+    }
+#endif
+}

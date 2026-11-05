@@ -176,7 +176,7 @@ void KLayoutRequestsTest::resolveKLayoutRootCell_singleTopCell()
              QStringLiteral("TOP"));
 }
 
-void KLayoutRequestsTest::resolveKLayoutRootCell_multipleTopCellsUsesFirstSorted()
+void KLayoutRequestsTest::resolveKLayoutRootCell_multipleTopCellsPrefersRichest()
 {
     LayoutHierarchySnapshot hierarchy;
     hierarchy.topCells = QStringList{
@@ -184,9 +184,28 @@ void KLayoutRequestsTest::resolveKLayoutRootCell_multipleTopCellsUsesFirstSorted
     hierarchy.topCells.sort();
     hierarchy.allCells.insert(QStringLiteral("zebra"));
     hierarchy.allCells.insert(QStringLiteral("alpha"));
+    hierarchy.childCounts.insert(QStringLiteral("zebra"), 12);
+    hierarchy.childCounts.insert(QStringLiteral("alpha"), 1);
 
     QCOMPARE(resolveKLayoutRootCell(hierarchy, QStringLiteral("not_in_file")),
-             QStringLiteral("alpha"));
+             QStringLiteral("zebra"));
+}
+
+void KLayoutRequestsTest::resolveKLayoutRootCell_prefersFileStemHint()
+{
+    LayoutHierarchySnapshot hierarchy;
+    hierarchy.topCells = QStringList{
+        QStringLiteral("alpha"), QStringLiteral("design_top")};
+    hierarchy.topCells.sort();
+    hierarchy.allCells.insert(QStringLiteral("alpha"));
+    hierarchy.allCells.insert(QStringLiteral("design_top"));
+    hierarchy.childCounts.insert(QStringLiteral("alpha"), 50);
+    hierarchy.childCounts.insert(QStringLiteral("design_top"), 1);
+
+    QCOMPARE(resolveKLayoutRootCell(hierarchy,
+                                    QStringLiteral("missing_group"),
+                                    QStringLiteral("design_top")),
+             QStringLiteral("design_top"));
 }
 
 void KLayoutRequestsTest::resolveKLayoutRootCell_emptyHierarchyReturnsEmpty()
@@ -212,5 +231,5 @@ void KLayoutRequestsTest::loadLayoutHierarchySnapshot_layoutCore_fixture()
 
     const QString resolved =
         resolveKLayoutRootCell(hierarchy, QStringLiteral("sg13g2_stdcell"));
-    QCOMPARE(resolved, hierarchy.topCells.first());
+    QVERIFY(hierarchy.topCells.contains(resolved));
 }

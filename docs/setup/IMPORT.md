@@ -49,7 +49,7 @@ Cell name is taken from the source file base name (`OTA1336.sch` → cell `OTA13
 
 GDS import uses `--all-cells` so multi-cell libraries are preserved in one `.layout.room` file per source GDS.
 
-Large GDS files (fill/AREF-heavy chips) convert in a few seconds; DOOR no longer requests or streams a full text dump into the Import log (that used to freeze the UI). Converter stdout is capped in the dialog. Optional dumps: run `gds_to_room --dump out.txt …` yourself.
+Large GDS files (fill/AREF-heavy chips) convert in a few seconds; DOOR no longer requests or streams a full text dump into the Import log (that used to freeze the UI). Converter stdout is capped in the dialog. When KLayout is available, `gds_to_room` bridges GDS→OAS→ROOM so the `.layout.room` size matches an OAS import of the same design (`--direct` skips the bridge). Optional dumps: run `gds_to_room --dump out.txt …` yourself.
 
 ---
 

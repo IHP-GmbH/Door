@@ -147,6 +147,7 @@ add_executable(tst_libman_gui
 target_compile_definitions(tst_libman_gui PRIVATE
     QT_NO_DEPRECATED_WARNINGS
     LIBMAN_TESTING
+    LIBMAN_NO_ROOM
 )
 
 if(WIN32)

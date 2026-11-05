@@ -7,6 +7,8 @@
 #include <QSet>
 #include <QByteArray>
 
+#include <functional>
+
 struct LayoutHierarchy
 {
     QStringList                 topCells;
@@ -17,9 +19,14 @@ struct LayoutHierarchy
 class oasReader
 {
 public:
+    using ProgressFn = std::function<void(const QString &cellName)>;
+    using RenameFn = std::function<void(const QString &from, const QString &to)>;
+
     explicit                    oasReader(const QString &fileName);
 
-    bool                        readHierarchy(LayoutHierarchy &out);
+    bool                        readHierarchy(LayoutHierarchy &out,
+                                              const ProgressFn &onCell = {},
+                                              const RenameFn &onRename = {});
     QStringList                 getErrors() const;
 
     void                        oasCreate(const QString &cellName);

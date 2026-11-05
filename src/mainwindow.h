@@ -17,9 +17,11 @@ class QMimeData;
 class QDropEvent;
 class QJsonObject;
 #include <QHash>
+#include <QPair>
 #include <QSet>
 #include <QTimer>
 #include <QDateTime>
+#include <QVector>
 #include <memory>
 
 class Properties;
@@ -413,6 +415,14 @@ private:
 
     void                                setLoadingSpinner(QTreeWidgetItem *item, bool on);
 
+    void                                clearTreeItemChildren(QTreeWidgetItem *parent);
+    void                                appendProgressCellNames(QTreeWidgetItem *parent,
+                                                                const QStringList &names,
+                                                                int pathRole,
+                                                                const QString &path);
+    void                                renameProgressCellNames(QTreeWidgetItem *parent,
+                                                                const QVector<QPair<QString, QString>> &renames);
+
     std::shared_ptr<GdsCacheEntry>      ensureGdsLoaded(const QString &gdsPath);
     void                                populateGdsTopLevel(QTreeWidgetItem *gdsItem,
                                                             const std::shared_ptr<GdsCacheEntry> &entry);
@@ -664,6 +674,7 @@ private:
     QHash<QString, std::shared_ptr<LStreamCacheEntry>> m_lstreamCache;     /*!< LStream hierarchy cache: abs path -> entry. */
     QHash<QString, std::shared_ptr<CoreCacheEntry>> m_coreCache;           /*!< ROOM hierarchy cache: abs path -> entry. */
     SnapshotView                       *m_snapshotView = nullptr;         /*!< Schematic/symbol thumbnail under the view list. */
+    quint64                             m_snapshotRequestId = 0;          /*!< Ignores stale async snapshot results. */
     ProjectEditor                      *m_projectEditor = nullptr;        /*!< .projects editor pane in the main splitter. */
     PythonConsole                      *m_pythonConsole = nullptr;        /*!< Persistent Python REPL with ROOM preloaded. */
     QStringList                         m_pythonHistory;                  /*!< Command Line history (newest at end). */

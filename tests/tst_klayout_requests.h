@@ -16,7 +16,8 @@ private slots:
 
     void resolveKLayoutRootCell_prefersGroupWhenPresent();
     void resolveKLayoutRootCell_singleTopCell();
-    void resolveKLayoutRootCell_multipleTopCellsUsesFirstSorted();
+    void resolveKLayoutRootCell_multipleTopCellsPrefersRichest();
+    void resolveKLayoutRootCell_prefersFileStemHint();
     void resolveKLayoutRootCell_emptyHierarchyReturnsEmpty();
     void loadLayoutHierarchySnapshot_layoutCore_fixture();
 };

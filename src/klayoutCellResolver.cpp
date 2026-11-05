@@ -7,14 +7,30 @@
 #include "src/lstreamcellreader.h"
 
 #include <QFileInfo>
+#include <QMap>
 
 namespace {
+
+void fillChildCounts(LayoutHierarchySnapshot &out, const QMap<QString, QStringList> &children)
+{
+    for (auto it = children.constBegin(); it != children.constEnd(); ++it) {
+        out.childCounts.insert(it.key(), it.value().size());
+    }
+}
+
+void fillChildCounts(LayoutHierarchySnapshot &out, const QHash<QString, QStringList> &children)
+{
+    for (auto it = children.constBegin(); it != children.constEnd(); ++it) {
+        out.childCounts.insert(it.key(), it.value().size());
+    }
+}
 
 LayoutHierarchySnapshot snapshotFromGds(const GdsReader::GdsHierarchy &h)
 {
     LayoutHierarchySnapshot out;
     out.topCells = h.topCells;
     out.allCells = h.allCells;
+    fillChildCounts(out, h.children);
     return out;
 }
 
@@ -23,6 +39,7 @@ LayoutHierarchySnapshot snapshotFromOas(const LayoutHierarchy &h)
     LayoutHierarchySnapshot out;
     out.topCells = h.topCells;
     out.allCells = h.allCells;
+    fillChildCounts(out, h.children);
     return out;
 }
 
@@ -31,6 +48,7 @@ LayoutHierarchySnapshot snapshotFromCore(const RoomCellReader::CoreHierarchy &h)
     LayoutHierarchySnapshot out;
     out.topCells = h.topCells;
     out.allCells = h.allCells;
+    fillChildCounts(out, h.children);
     return out;
 }
 
@@ -55,13 +73,58 @@ bool isLayoutCorePath(const QString &path)
     return QFileInfo(path).suffix().compare(QStringLiteral("core"), Qt::CaseInsensitive) == 0;
 }
 
+QString findCellIgnoreCase(const QSet<QString> &cells, const QString &name)
+{
+    if (name.isEmpty()) {
+        return QString();
+    }
+    if (cells.contains(name)) {
+        return name;
+    }
+    for (const QString &cell : cells) {
+        if (cell.compare(name, Qt::CaseInsensitive) == 0) {
+            return cell;
+        }
+    }
+    return QString();
+}
+
+QString pickRichestTopCell(const LayoutHierarchySnapshot &hierarchy)
+{
+    if (hierarchy.topCells.isEmpty()) {
+        return QString();
+    }
+
+    QString best = hierarchy.topCells.first();
+    int bestScore = hierarchy.childCounts.value(best, 0);
+
+    for (int i = 1; i < hierarchy.topCells.size(); ++i) {
+        const QString &candidate = hierarchy.topCells.at(i);
+        const int score = hierarchy.childCounts.value(candidate, 0);
+        if (score > bestScore
+            || (score == bestScore && candidate < best)) {
+            best = candidate;
+            bestScore = score;
+        }
+    }
+
+    return best;
+}
+
 } // namespace
 
 QString resolveKLayoutRootCell(const LayoutHierarchySnapshot &hierarchy,
-                               const QString &groupName)
+                               const QString &groupName,
+                               const QString &hintName)
 {
-    if (!groupName.isEmpty() && hierarchy.allCells.contains(groupName)) {
-        return groupName;
+    if (const QString matched = findCellIgnoreCase(hierarchy.allCells, groupName);
+        !matched.isEmpty()) {
+        return matched;
+    }
+
+    if (const QString matched = findCellIgnoreCase(hierarchy.allCells, hintName);
+        !matched.isEmpty()) {
+        return matched;
     }
 
     if (hierarchy.topCells.size() == 1) {
@@ -69,7 +132,7 @@ QString resolveKLayoutRootCell(const LayoutHierarchySnapshot &hierarchy,
     }
 
     if (!hierarchy.topCells.isEmpty()) {
-        return hierarchy.topCells.first();
+        return pickRichestTopCell(hierarchy);
     }
 
     return QString();

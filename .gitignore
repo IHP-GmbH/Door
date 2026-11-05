@@ -93,3 +93,11 @@ tests/data/EMTest/**/*_dump.sym
 
 # --- Local scratch ---
 ieee/
+
+# --- Local wafer / bench fixtures (never commit) ---
+/data/
+**/wafer.oas
+**/wafer.gds
+**/wafer.layout.room
+**/bench_wafer*
+scripts/bench_wafer*

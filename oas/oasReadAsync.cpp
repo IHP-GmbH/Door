@@ -8,8 +8,16 @@
 #include <QPalette>
 #include <QtMath>
 #include <QDebug>
+#include <QMutex>
+#include <QElapsedTimer>
+#include <QMetaObject>
+#include <QStatusBar>
+#include <QFileInfo>
+#include <QPair>
+#include <QVector>
 
 
+#include "oas/oasReader.h"
 #include "src/mainwindow.h"
 #include "ui_mainwindow.h"
 
@@ -75,10 +83,11 @@ std::shared_ptr<MainWindow::OasCacheEntry> MainWindow::ensureOasLoaded(const QSt
 }
 
 /*!*******************************************************************************************************************
- * \brief Populates the top-level OASIS cells in the tree widget.
+ * \brief Populates OASIS cells in the tree widget.
  *
- * Creates one tree item per top-level cell found in the parsed hierarchy.
- * Child indicators are added if the cell has sub-cells.
+ * Lists every cell from the hierarchy (not only top cells). Top cells are
+ * inserted first, then the remaining names alphabetically. Child indicators
+ * are added when the cell has placements.
  *
  * \param oasItem Tree widget item representing the OASIS file.
  * \param entry   Shared cache entry containing the parsed hierarchy.
@@ -94,17 +103,36 @@ void MainWindow::populateOasTopLevel(QTreeWidgetItem *oasItem,
         return;
     }
 
+    QStringList names;
+    names.reserve(entry->hierarchy.allCells.size());
+
+    QSet<QString> seen;
     for (const QString &topCell : entry->hierarchy.topCells) {
+        if (seen.contains(topCell)) {
+            continue;
+        }
+        names << topCell;
+        seen.insert(topCell);
+    }
+
+    QStringList rest;
+    rest.reserve(entry->hierarchy.allCells.size());
+    for (const QString &cell : entry->hierarchy.allCells) {
+        if (!seen.contains(cell)) {
+            rest << cell;
+        }
+    }
+    rest.sort();
+    names += rest;
+
+    for (const QString &cellName : names) {
         auto *cellItem = new QTreeWidgetItem(oasItem);
-
-        //dbgStr("OAS TOPCELL", topCell);
-
-        cellItem->setText(0, topCell);
+        cellItem->setText(0, cellName);
         cellItem->setData(0, RoleType, ItemCell);
-        cellItem->setData(0, RoleCellName, topCell);
+        cellItem->setData(0, RoleCellName, cellName);
         cellItem->setData(0, RoleOasPath, entry->path);
 
-        const auto it = entry->hierarchy.children.find(topCell);
+        const auto it = entry->hierarchy.children.find(cellName);
         if (it != entry->hierarchy.children.end() && !it.value().isEmpty()) {
             cellItem->setChildIndicatorPolicy(QTreeWidgetItem::ShowIndicator);
         }
@@ -188,16 +216,21 @@ void MainWindow::loadOasHierarchyAsync(const QString &oasPath,
         setLoadingSpinner(targetItem, true);
     }
 
+    const bool progressiveRoot = targetItem && requestedCellName.isEmpty();
+    QTreeWidgetItem *targetRaw = targetItem;
+    QPointer<MainWindow> self(this);
+    const QString absPath = QFileInfo(oasPath).absoluteFilePath();
+
     auto *watcher = new QFutureWatcher<OasCacheEntry>(this);
 
     connect(watcher, &QFutureWatcher<OasCacheEntry>::finished, this,
-            [this, watcher, entry, targetItem, requestedCellName]()
+            [this, watcher, entry, targetRaw, requestedCellName]()
             {
                 const OasCacheEntry r = watcher->result();
                 watcher->deleteLater();
 
-                if (targetItem) {
-                    setLoadingSpinner(targetItem, false);
+                if (targetRaw) {
+                    setLoadingSpinner(targetRaw, false);
                 }
 
                 entry->errors    = r.errors;
@@ -218,31 +251,125 @@ void MainWindow::loadOasHierarchyAsync(const QString &oasPath,
                     10000
                     );
 
-                if (!targetItem) {
+                if (!targetRaw || !targetRaw->treeWidget()) {
                     return;
                 }
+
+                clearTreeItemChildren(targetRaw);
 
                 if (!requestedCellName.isEmpty()) {
-                    populateOasCellChildren(targetItem, entry, requestedCellName);
-                    targetItem->setExpanded(true);
+                    populateOasCellChildren(targetRaw, entry, requestedCellName);
+                    targetRaw->setExpanded(true);
                     return;
                 }
 
-                populateOasTopLevel(targetItem, entry);
-                targetItem->setExpanded(true);
+                populateOasTopLevel(targetRaw, entry);
+                targetRaw->setExpanded(true);
             });
 
-    auto future = QtConcurrent::run([oasPath]() -> OasCacheEntry {
+    auto future = QtConcurrent::run([absPath, self, targetRaw, progressiveRoot]() -> OasCacheEntry {
         OasCacheEntry out;
-        out.path = QFileInfo(oasPath).absoluteFilePath();
+        out.path = absPath;
+
+        if (self) {
+            QMetaObject::invokeMethod(self.data(), [self]() {
+                if (!self) {
+                    return;
+                }
+                self->statusBar()->showMessage(
+                    QStringLiteral("Reading OASIS file into memory…"), 0);
+            }, Qt::QueuedConnection);
+        }
+
+        QMutex batchMutex;
+        QStringList pendingAdds;
+        QVector<QPair<QString, QString>> pendingRenames;
+        QElapsedTimer lastFlush;
+        lastFlush.start();
+        int reported = 0;
+        int renamed = 0;
+
+        auto flushProgress = [&](bool force) {
+            if (!progressiveRoot || !self || !targetRaw) {
+                pendingAdds.clear();
+                pendingRenames.clear();
+                return;
+            }
+
+            QStringList addBatch;
+            QVector<QPair<QString, QString>> renameBatch;
+            {
+                QMutexLocker lock(&batchMutex);
+                // Flush often so wafer-sized OAS shows cells within the first seconds.
+                if (!force
+                    && pendingAdds.size() < 16
+                    && pendingRenames.size() < 16
+                    && lastFlush.elapsed() < 80) {
+                    return;
+                }
+                addBatch.swap(pendingAdds);
+                renameBatch.swap(pendingRenames);
+                lastFlush.restart();
+            }
+            if (addBatch.isEmpty() && renameBatch.isEmpty()) {
+                return;
+            }
+
+            reported += addBatch.size();
+            renamed += renameBatch.size();
+            const int total = reported;
+            const int renamedTotal = renamed;
+            QMetaObject::invokeMethod(self.data(),
+                [self, targetRaw, absPath, addBatch, renameBatch, total, renamedTotal]() {
+                if (!self || !targetRaw || !targetRaw->treeWidget()) {
+                    return;
+                }
+                if (!addBatch.isEmpty()) {
+                    self->appendProgressCellNames(targetRaw, addBatch,
+                                                  MainWindow::RoleOasPath, absPath);
+                }
+                if (!renameBatch.isEmpty()) {
+                    self->renameProgressCellNames(targetRaw, renameBatch);
+                }
+                self->statusBar()->showMessage(
+                    QStringLiteral("Scanning OASIS… %1 cells (%2 named)")
+                        .arg(total)
+                        .arg(renamedTotal),
+                    0);
+            }, Qt::QueuedConnection);
+        };
 
         oasReader reader(out.path);
-        if (!reader.readHierarchy(out.hierarchy)) {
+        if (!reader.readHierarchy(out.hierarchy,
+                [&](const QString &cellName) {
+                    // Skip unresolved OAS ref stubs — real names arrive via onRename.
+                    if (cellName.startsWith(QLatin1String("#oasref:"))) {
+                        return;
+                    }
+                    {
+                        QMutexLocker lock(&batchMutex);
+                        pendingAdds << cellName;
+                    }
+                    flushProgress(false);
+                },
+                [&](const QString &from, const QString &to) {
+                    {
+                        QMutexLocker lock(&batchMutex);
+                        if (from.startsWith(QLatin1String("#oasref:"))) {
+                            // Stub was never shown; publish the resolved name as an add.
+                            pendingAdds << to;
+                        } else {
+                            pendingRenames.append(qMakePair(from, to));
+                        }
+                    }
+                    flushProgress(false);
+                })) {
             out.errors = reader.getErrors();
             out.loaded = false;
             return out;
         }
 
+        flushProgress(true);
         out.loaded = true;
         return out;
     });

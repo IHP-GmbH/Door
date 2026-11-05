@@ -10,6 +10,7 @@
 #include "em_model_data.h"
 #include "enums.h"
 #include "room_json_io.h"
+#include "serialization.h"
 #endif
 
 namespace {
@@ -224,7 +225,14 @@ public:
 
     void drawFile(const QString &path, room::ViewType viewType, const QString &cellName)
     {
-        room::Database db = loadRoomDb(path);
+        // Layout snapshots decode only the focus cell (+ a few instance levels),
+        // not the entire multi-GB library payload.
+        room::Database db;
+        if (viewType == room::ViewType::Layout) {
+            db = room::loadLayoutCellSubtree(path.toStdString(), cellName.toStdString(), 4);
+        } else {
+            db = loadRoomDb(path);
+        }
         m_lib = &db.lib();
         m_layout = viewType == room::ViewType::Layout;
 

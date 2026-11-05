@@ -415,7 +415,7 @@ static inline QString decodeNameLatin1(const uchar *payload, int n)
  * \param out Output hierarchy container to fill (cleared on entry).
  * \return true on success, false on error (details are stored in \c m_errorList).
  *********************************************************************************************************************/
-bool GdsReader::readHierarchy(GdsHierarchy &out)
+bool GdsReader::readHierarchy(GdsHierarchy &out, const ProgressFn &onCell)
 {
     out.topCells.clear();
     out.children.clear();
@@ -487,8 +487,12 @@ bool GdsReader::readHierarchy(GdsHierarchy &out)
         if (recType == GDS_STRNAME) {
             currentCell = decodeNameLatin1(payload, payloadLen);
             if (!currentCell.isEmpty()) {
+                const bool isNew = !out.allCells.contains(currentCell);
                 out.allCells.insert(currentCell);
                 out.children[currentCell]; // ensure entry
+                if (isNew && onCell) {
+                    onCell(currentCell);
+                }
             }
             inRef = false;
         }

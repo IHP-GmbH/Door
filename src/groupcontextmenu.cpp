@@ -638,6 +638,14 @@ void MainWindow::on_viewItemExpanded(QTreeWidgetItem *item)
 
         auto entry = ensureOasLoaded(oasPath);
 
+        // Previous failed/empty loads must not stick forever with loaded=true.
+        if (entry->loaded
+            && entry->hierarchy.topCells.isEmpty()
+            && entry->hierarchy.allCells.isEmpty()) {
+            entry->loaded = false;
+            entry->errors.clear();
+        }
+
         if (entry->loaded) {
             populateOasTopLevel(item, entry);
             return;

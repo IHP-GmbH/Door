@@ -7,6 +7,8 @@
 #include <QMap>
 #include <QSet>
 
+#include <functional>
+
 class GdsReader
 {
 public:
@@ -16,13 +18,15 @@ public:
         QSet<QString> allCells;
     };
 
+    using ProgressFn = std::function<void(const QString &cellName)>;
+
 public:
     explicit GdsReader(const QString &fileName);
 
     void        gdsCreate(const QString &cellName);
     QStringList getErrors() const { return m_errorList; }
 
-    bool        readHierarchy(GdsHierarchy &out);
+    bool        readHierarchy(GdsHierarchy &out, const ProgressFn &onCell = {});
 
 private:
     void        gdsBegin(const QString &libName) const;

@@ -20,7 +20,7 @@ void MainWindow::loadRoomHierarchyAsync(const QString &corePath,
     }
 
     entry->loading = true;
-    statusBar()->showMessage(tr("Scanning ROOM hierarchy…"), 0);
+    statusBar()->showMessage(tr("Sniffing ROOM cell names…"), 0);
 
     if (targetItem) {
         setLoadingSpinner(targetItem, true);
@@ -52,7 +52,7 @@ void MainWindow::loadRoomHierarchyAsync(const QString &corePath,
                 }
 
                 statusBar()->showMessage(
-                    tr("ROOM loaded: %1 cells").arg(entry->hierarchy.allCells.size()),
+                    tr("ROOM cells ready: %1").arg(entry->hierarchy.allCells.size()),
                     10000);
 
                 if (!targetItem) {

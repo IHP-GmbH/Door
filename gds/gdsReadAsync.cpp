@@ -8,6 +8,9 @@
 #include <QPixmap>
 #include <QPalette>
 #include <QtMath>
+#include <QMutex>
+#include <QElapsedTimer>
+#include <QMetaObject>
 
 
 #include "gds/gdsreader.h"
@@ -148,6 +151,60 @@ void MainWindow::setLoadingSpinner(QTreeWidgetItem *item, bool on)
     timer->start();
 }
 
+void MainWindow::clearTreeItemChildren(QTreeWidgetItem *parent)
+{
+    if (!parent) {
+        return;
+    }
+    while (parent->childCount() > 0) {
+        delete parent->takeChild(0);
+    }
+}
+
+void MainWindow::appendProgressCellNames(QTreeWidgetItem *parent,
+                                         const QStringList &names,
+                                         int pathRole,
+                                         const QString &path)
+{
+    if (!parent || names.isEmpty()) {
+        return;
+    }
+
+    for (const QString &name : names) {
+        auto *cellItem = new QTreeWidgetItem(parent);
+        cellItem->setText(0, name);
+        cellItem->setData(0, RoleType, ItemCell);
+        cellItem->setData(0, RoleCellName, name);
+        cellItem->setData(0, pathRole, path);
+    }
+}
+
+void MainWindow::renameProgressCellNames(QTreeWidgetItem *parent,
+                                         const QVector<QPair<QString, QString>> &renames)
+{
+    if (!parent || renames.isEmpty()) {
+        return;
+    }
+
+    QHash<QString, QTreeWidgetItem *> byName;
+    byName.reserve(parent->childCount());
+    for (int i = 0; i < parent->childCount(); ++i) {
+        QTreeWidgetItem *child = parent->child(i);
+        byName.insert(child->data(0, RoleCellName).toString(), child);
+    }
+
+    for (const auto &pair : renames) {
+        QTreeWidgetItem *item = byName.value(pair.first, nullptr);
+        if (!item) {
+            continue;
+        }
+        byName.remove(pair.first);
+        item->setText(0, pair.second);
+        item->setData(0, RoleCellName, pair.second);
+        byName.insert(pair.second, item);
+    }
+}
+
 /*!********************************************************************************************************************
  * \brief Loads GDS hierarchy asynchronously and updates the UI on completion.
  *
@@ -192,16 +249,21 @@ void MainWindow::loadGdsHierarchyAsync(const QString &gdsPath,
         setLoadingSpinner(targetItem, true);
     }
 
+    const bool progressiveRoot = targetItem && requestedCellName.isEmpty();
+    QTreeWidgetItem *targetRaw = targetItem;
+    QPointer<MainWindow> self(this);
+    const QString absPath = QFileInfo(gdsPath).absoluteFilePath();
+
     auto *watcher = new QFutureWatcher<GdsCacheEntry>(this);
 
     connect(watcher, &QFutureWatcher<GdsCacheEntry>::finished, this,
-            [this, watcher, entry, targetItem, requestedCellName]()
+            [this, watcher, entry, targetRaw, requestedCellName]()
             {
                 const GdsCacheEntry r = watcher->result();
                 watcher->deleteLater();
 
-                if (targetItem) {
-                    setLoadingSpinner(targetItem, false);
+                if (targetRaw) {
+                    setLoadingSpinner(targetRaw, false);
                 }
 
                 entry->errors    = r.errors;
@@ -222,31 +284,78 @@ void MainWindow::loadGdsHierarchyAsync(const QString &gdsPath,
                     10000
                     );
 
-                if (!targetItem) {
+                if (!targetRaw || !targetRaw->treeWidget()) {
                     return;
                 }
+
+                clearTreeItemChildren(targetRaw);
 
                 if (!requestedCellName.isEmpty()) {
-                    populateCellChildren(targetItem, entry, requestedCellName);
-                    targetItem->setExpanded(true);
+                    populateCellChildren(targetRaw, entry, requestedCellName);
+                    targetRaw->setExpanded(true);
                     return;
                 }
 
-                populateGdsTopLevel(targetItem, entry);
-                targetItem->setExpanded(true);
+                populateGdsTopLevel(targetRaw, entry);
+                targetRaw->setExpanded(true);
             });
 
-    auto future = QtConcurrent::run([gdsPath]() -> GdsCacheEntry {
+    auto future = QtConcurrent::run([absPath, self, targetRaw, progressiveRoot]() -> GdsCacheEntry {
         GdsCacheEntry out;
-        out.path = QFileInfo(gdsPath).absoluteFilePath();
+        out.path = absPath;
+
+        QMutex batchMutex;
+        QStringList pending;
+        QElapsedTimer lastFlush;
+        lastFlush.start();
+        int reported = 0;
+
+        auto flushProgress = [&](bool force) {
+            if (!progressiveRoot || !self || !targetRaw) {
+                pending.clear();
+                return;
+            }
+
+            QStringList batch;
+            {
+                QMutexLocker lock(&batchMutex);
+                if (!force && pending.size() < 48 && lastFlush.elapsed() < 120) {
+                    return;
+                }
+                batch.swap(pending);
+                lastFlush.restart();
+            }
+            if (batch.isEmpty()) {
+                return;
+            }
+
+            reported += batch.size();
+            const int total = reported;
+            QMetaObject::invokeMethod(self.data(), [self, targetRaw, absPath, batch, total]() {
+                if (!self || !targetRaw || !targetRaw->treeWidget()) {
+                    return;
+                }
+                self->appendProgressCellNames(targetRaw, batch,
+                                              MainWindow::RoleGdsPath, absPath);
+                self->statusBar()->showMessage(
+                    QStringLiteral("Scanning GDS… %1 cells").arg(total), 0);
+            }, Qt::QueuedConnection);
+        };
 
         GdsReader reader(out.path);
-        if (!reader.readHierarchy(out.hierarchy)) {
+        if (!reader.readHierarchy(out.hierarchy, [&](const QString &cellName) {
+                {
+                    QMutexLocker lock(&batchMutex);
+                    pending << cellName;
+                }
+                flushProgress(false);
+            })) {
             out.errors = reader.getErrors();
             out.loaded = false;
             return out;
         }
 
+        flushProgress(true);
         out.loaded = true;
         return out;
     });
