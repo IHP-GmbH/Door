@@ -63,7 +63,7 @@ cmake -S "%ROOM_SRC%" -B "%ROOM_BUILD%" ^
     -G "MinGW Makefiles"
 if errorlevel 1 exit /b 1
 
-cmake --build "%ROOM_BUILD%" --target room room_utils gds_to_room xschem_to_room qucs_to_room room_to_gds room_to_xschem room_to_qucs -j
+cmake --build "%ROOM_BUILD%" --target room room_utils room_oas gds_to_room xschem_to_room qucs_to_room room_to_gds room_to_xschem room_to_qucs -j
 if errorlevel 1 exit /b 1
 
 cmake --build "%ROOM_BUILD%" --target oas_to_room -j 2>nul

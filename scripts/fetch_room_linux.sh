@@ -57,7 +57,7 @@ cmake -S "$ROOM_SRC" -B "$ROOM_BUILD" \
     -DROOM_BUILD_OAS_TESTS=OFF \
     -DROOM_BUILD_EXAMPLES=ON
 
-cmake --build "$ROOM_BUILD" --target room room_utils gds_to_room xschem_to_room qucs_to_room room_to_gds room_to_xschem room_to_qucs -j"$(nproc 2>/dev/null || echo 2)"
+cmake --build "$ROOM_BUILD" --target room room_utils room_oas gds_to_room xschem_to_room qucs_to_room room_to_gds room_to_xschem room_to_qucs -j"$(nproc 2>/dev/null || echo 2)"
 cmake --build "$ROOM_BUILD" --target oas_to_room -j"$(nproc 2>/dev/null || echo 2)" || true
 
 touch "$STAMP"

@@ -26,7 +26,8 @@ INCLUDEPATH += \
     $$ROOM_SRC_DIR/utils \
     $$ROOM_BUILD_DIR/generated
 
-LIBS += -L$$ROOM_BUILD_DIR -lroom_utils -lroom
+# room_oas (OasReader) before room_utils/room for GNU static link order.
+LIBS += -L$$ROOM_BUILD_DIR -lroom_oas -lroom_utils -lroom
 # ROOM archives depend on capnp; repeat for GNU static link order.
 LIBS += -lcapnp -lkj
 
