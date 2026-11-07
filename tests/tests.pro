@@ -118,6 +118,7 @@ SOURCES += \
     tst_mainwindow_categories.cpp \
     tst_mainwindow_loaders.cpp \
     tst_oas_writer.cpp \
+    tst_snapshot_layout.cpp \
     tst_toolmanager.cpp \
     tst_coverage_expansion.cpp \
     tst_coverage_80.cpp \
@@ -182,6 +183,7 @@ HEADERS += \
     tst_mainwindow_categories.h \
     tst_mainwindow_loaders.h \
     tst_oas_writer.h \
+    tst_snapshot_layout.h \
     tst_toolmanager.h \
     tst_coverage_expansion.h \
     tst_coverage_80.h \

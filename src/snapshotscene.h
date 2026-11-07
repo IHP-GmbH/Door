@@ -5,7 +5,10 @@
 #include <QPolygonF>
 #include <QRectF>
 #include <QString>
+#include <QStringList>
 #include <QVector>
+
+#include <QtGlobal>
 
 #include <functional>
 
@@ -44,5 +47,26 @@ SnapshotScene loadCoreSnapshot(const QString &corePath,
  * emmodel file. Empty if missing, GDS-only, or unreadable.
  */
 QString layoutRoomPathFromEmModel(const QString &emmodelPath, QString *topCellOut = nullptr);
+
+/*! True when path is a ROOM layout suitable for emsetup/layout snapshot. */
+bool isRoomLayoutSnapshotPath(const QString &path);
+
+/*!
+ * Layout tree selection → focus cell name.
+ * Expanded child uses \p treeCellName; view root uses \p resolvedTopCell then \p groupNameFallback.
+ */
+QString layoutSnapshotFocusCell(bool selectingTreeCell,
+                                const QString &treeCellName,
+                                const QString &resolvedTopCell,
+                                const QString &groupNameFallback);
+
+/*! Stem used when LibMan group name is missing inside *.layout.room (file basename). */
+QString layoutSnapshotPathStem(const QString &layoutPath);
+
+/*!
+ * Names to try with loadLayoutCellSubtree when LibMan cell ≠ GDS top
+ * (requested → path stem → empty/primary). Deduped, order preserved.
+ */
+QStringList layoutSubtreeLoadAttempts(const QString &requestedCell, const QString &layoutPath);
 
 #endif

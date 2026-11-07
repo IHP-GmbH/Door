@@ -3,7 +3,71 @@
 #include <QDir>
 #include <QFileInfo>
 
+#include <algorithm>
 #include <cmath>
+#include <exception>
+#include <queue>
+
+bool isRoomLayoutSnapshotPath(const QString &path)
+{
+    if (path.isEmpty() || !QFileInfo::exists(path)) {
+        return false;
+    }
+    const QString name = QFileInfo(path).fileName().toLower();
+    if (name.endsWith(QLatin1String(".layout.room"))) {
+        return true;
+    }
+    return name.endsWith(QLatin1String(".room"))
+        && !name.endsWith(QLatin1String(".emmodel.room"))
+        && !name.endsWith(QLatin1String(".schematic.room"))
+        && !name.endsWith(QLatin1String(".symbol.room"))
+        && !name.endsWith(QLatin1String(".abstract.room"));
+}
+
+QString layoutSnapshotFocusCell(bool selectingTreeCell,
+                                const QString &treeCellName,
+                                const QString &resolvedTopCell,
+                                const QString &groupNameFallback)
+{
+    if (selectingTreeCell) {
+        const QString named = treeCellName.trimmed();
+        if (!named.isEmpty()) {
+            return named;
+        }
+    }
+    const QString top = resolvedTopCell.trimmed();
+    if (!top.isEmpty()) {
+        return top;
+    }
+    return groupNameFallback.trimmed();
+}
+
+QString layoutSnapshotPathStem(const QString &layoutPath)
+{
+    QString name = QFileInfo(layoutPath).fileName();
+    if (name.endsWith(QStringLiteral(".room"), Qt::CaseInsensitive)) {
+        name.chop(5);
+    }
+    const int dot = name.lastIndexOf(QLatin1Char('.'));
+    if (dot > 0) {
+        name = name.left(dot);
+    }
+    return name;
+}
+
+QStringList layoutSubtreeLoadAttempts(const QString &requestedCell, const QString &layoutPath)
+{
+    QStringList attempts;
+    const auto add = [&attempts](const QString &name) {
+        if (!attempts.contains(name)) {
+            attempts.push_back(name);
+        }
+    };
+    add(requestedCell.trimmed());
+    add(layoutSnapshotPathStem(layoutPath));
+    add(QString()); // empty → summary primary / first cell
+    return attempts;
+}
 
 #ifndef LIBMAN_NO_ROOM
 #include "database.h"
@@ -229,7 +293,31 @@ public:
         // not the entire multi-GB library payload.
         room::Database db;
         if (viewType == room::ViewType::Layout) {
-            db = room::loadLayoutCellSubtree(path.toStdString(), cellName.toStdString(), 4);
+            // LibMan cell/group name often differs from GDS tops inside *.layout.room
+            // (e.g. group cmim_… vs cell TOP). Try requested → stem → primary/first.
+            // Memory-mapped, budgeted BFS decode; index bboxes cover what is not decoded.
+            const auto loadSubtree = [&](const QString &name) {
+                room::LayoutOverviewOptions options;
+                options.maxDepth = kMaxLayoutDepth;
+                return room::loadLayoutOverview(path.toStdString(), name.toStdString(), options);
+            };
+            std::exception_ptr lastError;
+            bool loaded = false;
+            for (const QString &attempt : layoutSubtreeLoadAttempts(cellName, path)) {
+                try {
+                    db = loadSubtree(attempt);
+                    loaded = true;
+                    break;
+                } catch (...) {
+                    lastError = std::current_exception();
+                }
+            }
+            if (!loaded) {
+                if (lastError) {
+                    std::rethrow_exception(lastError);
+                }
+                throw std::runtime_error("Layout cell not found in ROOM file");
+            }
         } else {
             db = loadRoomDb(path);
         }
@@ -261,7 +349,11 @@ public:
         }
 
         scene.yUp = m_layout || yGrowsUp(*content);
-        drawContent(*content, room::Transform(), 1.0, 0);
+        if (m_layout) {
+            drawLayoutTree(*content, cell->name());
+        } else {
+            drawContent(*content, room::Transform(), 1.0, 0);
+        }
         if (scene.empty()) {
             scene.message = QStringLiteral("This view has no drawable geometry");
         }
@@ -271,7 +363,184 @@ private:
     SnapshotSymbolResolver m_resolver;
     const room::Lib *m_lib = nullptr;
     bool m_layout = false;
-    static constexpr int kStrokeBudget = 15000;
+    static constexpr int kStrokeBudget = 80000;
+    static constexpr int kMaxLayoutDepth = 32;
+    static constexpr std::uint64_t kMaxArrayElements = 4096;
+    static constexpr std::size_t kMaxPending = 200000;
+    static constexpr double kDetailFraction = 1.0 / 1200.0; // ~sub-pixel at snapshot size
+
+    room::Box cellBox(const std::string &name, const room::CellContent *content) const
+    {
+        if (m_lib != nullptr && m_lib->hasIndex()) {
+            const auto it = m_lib->index().cellBboxes.find(name);
+            if (it != m_lib->index().cellBboxes.end() && !it->second.empty()) {
+                return it->second;
+            }
+        }
+        if (content != nullptr && !content->block().bbox().empty()) {
+            return content->block().bbox();
+        }
+        return room::Box();
+    }
+
+    QRectF mapBox(const room::Transform &transform, const room::Box &box) const
+    {
+        QPolygonF corners;
+        corners << mapPoint(transform, 1.0, double(box.llx), double(box.lly))
+                << mapPoint(transform, 1.0, double(box.urx), double(box.lly))
+                << mapPoint(transform, 1.0, double(box.urx), double(box.ury))
+                << mapPoint(transform, 1.0, double(box.llx), double(box.ury));
+        return corners.boundingRect();
+    }
+
+    void addBoxOutline(const QRectF &rect, const QColor &color)
+    {
+        QPolygonF poly;
+        poly << rect.topLeft() << rect.topRight() << rect.bottomRight() << rect.bottomLeft()
+             << rect.topLeft();
+        addStroke(poly, color, false);
+    }
+
+    static std::vector<room::Transform> expandPlacements(const room::Instance &instance)
+    {
+        const room::Transform &base = instance.transform();
+        std::vector<room::Transform> out;
+        if (!instance.offsets().empty()) {
+            out.reserve(instance.offsets().size() + 1);
+            out.push_back(base);
+            for (const room::Point &offset : instance.offsets()) {
+                room::Transform t = base;
+                t.x += offset.x;
+                t.y += offset.y;
+                out.push_back(t);
+            }
+            return out;
+        }
+        const std::uint64_t cols = std::max<std::uint32_t>(1, instance.columns());
+        const std::uint64_t rows = std::max<std::uint32_t>(1, instance.rows());
+        out.reserve(static_cast<std::size_t>(cols * rows));
+        for (std::uint64_t r = 0; r < rows; ++r) {
+            for (std::uint64_t c = 0; c < cols; ++c) {
+                room::Transform t = base;
+                t.x += std::int64_t(c) * instance.stepX() + std::int64_t(r) * instance.rowX();
+                t.y += std::int64_t(c) * instance.colY() + std::int64_t(r) * instance.stepY();
+                out.push_back(t);
+            }
+        }
+        return out;
+    }
+
+    static std::uint64_t placementCount(const room::Instance &instance)
+    {
+        if (!instance.offsets().empty()) {
+            return instance.offsets().size() + 1;
+        }
+        return std::uint64_t(std::max<std::uint32_t>(1, instance.columns()))
+            * std::uint64_t(std::max<std::uint32_t>(1, instance.rows()));
+    }
+
+    /*!
+     * Breadth-first so a stroke budget yields an overview of the whole cell, not one corner.
+     * Children smaller than a pixel are skipped; undecoded or huge arrays become bbox outlines.
+     */
+    void drawLayoutTree(const room::CellContent &rootContent, const std::string &rootName)
+    {
+        struct Pending {
+            const room::CellContent *content;
+            room::Transform transform;
+            int depth;
+        };
+
+        const room::Box rootBox = cellBox(rootName, &rootContent);
+        double minFeature = 0.0;
+        if (!rootBox.empty()) {
+            const double extent = std::max(double(rootBox.urx - rootBox.llx),
+                                           double(rootBox.ury - rootBox.lly));
+            minFeature = extent * kDetailFraction;
+            // Seed bounds so the view frames the whole cell even if the budget runs out.
+            includePoint(&scene.bounds, &m_hasPoint, QPointF(double(rootBox.llx), double(rootBox.lly)));
+            includePoint(&scene.bounds, &m_hasPoint, QPointF(double(rootBox.urx), double(rootBox.ury)));
+        }
+        const QColor boxColor(110, 110, 120, 200);
+
+        std::queue<Pending> pending;
+        pending.push({&rootContent, room::Transform(), 0});
+        while (!pending.empty() && scene.strokes.size() < kStrokeBudget) {
+            const Pending item = pending.front();
+            pending.pop();
+            drawContent(*item.content, item.transform, 1.0, item.depth);
+
+            for (const room::Instance &instance : item.content->block().instances()) {
+                if (scene.strokes.size() >= kStrokeBudget) {
+                    return;
+                }
+                const room::Cell *child = m_lib ? m_lib->findCell(instance.cellName()) : nullptr;
+                const room::CellContent *childContent =
+                    child ? child->findContent(room::ViewType::Layout) : nullptr;
+                const room::Box childBox = cellBox(instance.cellName(), childContent);
+                const bool canDescend = childContent != nullptr && item.depth + 1 <= kMaxLayoutDepth;
+
+                if (placementCount(instance) > kMaxArrayElements) {
+                    // Huge array: one envelope outline, no per-element descent.
+                    if (!childBox.empty()) {
+                        room::Box envelope;
+                        for (const room::Transform &corner : expandCorners(instance)) {
+                            const QRectF r = mapBox(composeTransform(item.transform, corner), childBox);
+                            envelope.expand(std::int64_t(r.left()), std::int64_t(r.top()));
+                            envelope.expand(std::int64_t(r.right()), std::int64_t(r.bottom()));
+                        }
+                        addBoxOutline(QRectF(QPointF(envelope.llx, envelope.lly),
+                                             QPointF(envelope.urx, envelope.ury)), boxColor);
+                    }
+                    continue;
+                }
+
+                for (const room::Transform &placement : expandPlacements(instance)) {
+                    if (scene.strokes.size() >= kStrokeBudget) {
+                        return;
+                    }
+                    const room::Transform composed = composeTransform(item.transform, placement);
+                    if (!childBox.empty()) {
+                        const QRectF r = mapBox(composed, childBox);
+                        if (std::max(r.width(), r.height()) < minFeature) {
+                            continue;
+                        }
+                        if (!canDescend) {
+                            addBoxOutline(r, boxColor);
+                            continue;
+                        }
+                    } else if (!canDescend) {
+                        continue;
+                    }
+                    if (pending.size() >= kMaxPending) {
+                        if (!childBox.empty()) {
+                            addBoxOutline(mapBox(composed, childBox), boxColor);
+                        }
+                        continue;
+                    }
+                    pending.push({childContent, composed, item.depth + 1});
+                }
+            }
+        }
+    }
+
+    static std::vector<room::Transform> expandCorners(const room::Instance &instance)
+    {
+        const room::Transform &base = instance.transform();
+        if (!instance.offsets().empty()) {
+            return expandPlacements(instance);
+        }
+        const std::int64_t c = std::max<std::uint32_t>(1, instance.columns()) - 1;
+        const std::int64_t r = std::max<std::uint32_t>(1, instance.rows()) - 1;
+        std::vector<room::Transform> out;
+        for (const auto &cr : {std::pair<std::int64_t, std::int64_t>{0, 0}, {c, 0}, {0, r}, {c, r}}) {
+            room::Transform t = base;
+            t.x += cr.first * instance.stepX() + cr.second * instance.rowX();
+            t.y += cr.first * instance.colY() + cr.second * instance.stepY();
+            out.push_back(t);
+        }
+        return out;
+    }
 
     void addStroke(const QPolygonF &points, const QColor &color, bool filled)
     {
@@ -421,22 +690,7 @@ private:
             return;
         }
         if (m_layout) {
-            if (depth >= 4 || m_lib == nullptr) {
-                return;
-            }
-            for (const room::Instance &instance : content.block().instances()) {
-                if (scene.strokes.size() >= kStrokeBudget) {
-                    return;
-                }
-                const room::Cell *child = m_lib->findCell(instance.cellName());
-                const room::CellContent *childContent =
-                    child == nullptr ? nullptr : child->findContent(room::ViewType::Layout);
-                if (childContent == nullptr) {
-                    continue;
-                }
-                drawContent(*childContent, composeTransform(transform, instance.transform()), scale, depth + 1);
-            }
-            return;
+            return; // hierarchy is walked breadth-first by drawLayoutTree()
         }
         if (depth > 0) {
             return;
@@ -564,13 +818,16 @@ namespace {
 
 bool looksLikeRoomLayoutPath(const QString &path)
 {
+    // Path may not exist yet during unit checks; match by suffix only.
     const QString name = QFileInfo(path).fileName().toLower();
-    return name.endsWith(QLatin1String(".layout.room"))
-        || (name.endsWith(QLatin1String(".room"))
-            && !name.endsWith(QLatin1String(".emmodel.room"))
-            && !name.endsWith(QLatin1String(".schematic.room"))
-            && !name.endsWith(QLatin1String(".symbol.room"))
-            && !name.endsWith(QLatin1String(".abstract.room")));
+    if (name.endsWith(QLatin1String(".layout.room"))) {
+        return true;
+    }
+    return name.endsWith(QLatin1String(".room"))
+        && !name.endsWith(QLatin1String(".emmodel.room"))
+        && !name.endsWith(QLatin1String(".schematic.room"))
+        && !name.endsWith(QLatin1String(".symbol.room"))
+        && !name.endsWith(QLatin1String(".abstract.room"));
 }
 
 QString resolveBeside(const QString &baseFile, const QString &maybeRelative)

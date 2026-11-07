@@ -15,6 +15,7 @@
 #include "tst_toolmanager.h"
 #include "tst_klayout_requests.h"
 #include "tst_oas_writer.h"
+#include "tst_snapshot_layout.h"
 #include "tst_lstream_writer.h"
 #include "tst_libfileparser.h"
 #include "tst_libdefine_utils.h"
@@ -135,6 +136,7 @@ int main(int argc, char **argv)
         ADD_TEST(ToolManagerTest),
         ADD_TEST(KLayoutRequestsTest),
         ADD_TEST(OasWriterTest),
+        ADD_TEST(SnapshotLayoutPolicyTest),
         ADD_TEST(LStreamWriterTest),
         ADD_TEST(LibFileParserTest),
         ADD_TEST(LibDefineUtilsTest),
@@ -149,9 +151,18 @@ int main(int argc, char **argv)
         ADD_TEST(CoreFileLockTest)
     };
 
+    QStringList onlySuites;
+    for(int i = 1; i < argc; ++i) {
+        onlySuites << QString::fromLocal8Bit(argv[i]);
+    }
+
     QStringList logFiles;
 
     for(const TestEntry &test : tests) {
+        if(!onlySuites.isEmpty() && !onlySuites.contains(test.name)) {
+            continue;
+        }
+
         const QString logFile = logDir + "/test_results_" + test.name + ".txt";
 
         QFile::remove(logFile);

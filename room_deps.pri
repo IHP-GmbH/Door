@@ -28,8 +28,8 @@ INCLUDEPATH += \
 
 # room_oas (OasReader) before room_utils/room for GNU static link order.
 LIBS += -L$$ROOM_BUILD_DIR -lroom_oas -lroom_utils -lroom
-# ROOM archives depend on capnp; repeat for GNU static link order.
-LIBS += -lcapnp -lkj
+# ROOM archives depend on capnp (and room_oas on zlib); repeat for GNU static link order.
+LIBS += -lcapnp -lkj -lz
 
 win32 {
     _fetchroom = $$replace($$shell_path($$LIBMAN_ROOT/scripts/fetch_room.cmd), \\, /)

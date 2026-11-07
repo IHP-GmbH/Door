@@ -4653,14 +4653,19 @@ void MainWindow::refreshSnapshot()
     };
 
     // Layout ROOM may be huge: decode one cell (+ shallow hierarchy) off the UI thread.
-    const auto startAsyncLayoutSnapshot = [this, symbolResolver](const QString &path,
-                                                                const QString &cellName) {
+    // Do not capture MainWindow into the worker (resize during load must stay race-free).
+    const auto startAsyncLayoutSnapshot = [this](const QString &path, const QString &cellName) {
         m_snapshotView->clearScene(tr("Loading snapshot…"));
         const quint64 requestId = ++m_snapshotRequestId;
         auto *watcher = new QFutureWatcher<SnapshotScene>(this);
         connect(watcher, &QFutureWatcher<SnapshotScene>::finished, this,
                 [this, watcher, requestId]() {
-                    const SnapshotScene scene = watcher->result();
+                    SnapshotScene scene;
+                    try {
+                        scene = watcher->result();
+                    } catch (...) {
+                        scene.message = tr("Snapshot failed");
+                    }
                     watcher->deleteLater();
                     if (requestId != m_snapshotRequestId || m_snapshotView == nullptr) {
                         return;
@@ -4670,8 +4675,9 @@ void MainWindow::refreshSnapshot()
                     }
                     m_snapshotView->setScene(scene);
                 });
-        watcher->setFuture(QtConcurrent::run([path, cellName, symbolResolver]() {
-            return loadCoreSnapshot(path, QStringLiteral("layout"), symbolResolver, cellName);
+        // Empty symbol resolver: layout draw path never needs MainWindow/UI.
+        watcher->setFuture(QtConcurrent::run([path, cellName]() {
+            return loadCoreSnapshot(path, QStringLiteral("layout"), {}, cellName);
         }));
     };
 
@@ -4689,22 +4695,26 @@ void MainWindow::refreshSnapshot()
                    "(topology.layoutPath must be *.layout.room)"));
             return;
         }
-        if (topCell.isEmpty()) {
-            topCell = getCurrentGroupName();
-        }
-        startAsyncLayoutSnapshot(layoutRoom, topCell);
+        const QString hint = topCell.isEmpty() ? getCurrentGroupName() : topCell;
+        const QString resolved = preferredKLayoutCellForRoot(layoutRoom, hint);
+        startAsyncLayoutSnapshot(layoutRoom, resolved.isEmpty() ? hint : resolved);
         return;
     }
 
-    // emsetup: show the cell's layout.room when present (same cell, ROOM only).
+    // emsetup: show the cell's layout.room when present (ROOM layout view only).
     if (isEmSetup) {
         const QString layoutPath =
             getViewPath(getCurrentLibraryName(), getCurrentGroupName(), QStringLiteral("layout"));
-        if (layoutPath.isEmpty() || !QFileInfo::exists(layoutPath)) {
+        if (!isRoomLayoutSnapshotPath(layoutPath)) {
             m_snapshotView->clearScene(tr("No ROOM layout view for this cell"));
             return;
         }
-        startAsyncLayoutSnapshot(layoutPath, getCurrentGroupName());
+        const QString groupName = getCurrentGroupName();
+        startAsyncLayoutSnapshot(
+            layoutPath,
+            layoutSnapshotFocusCell(false, QString(),
+                                    preferredKLayoutCellForRoot(layoutPath, groupName),
+                                    groupName));
         return;
     }
 
@@ -4713,16 +4723,28 @@ void MainWindow::refreshSnapshot()
         return;
     }
 
+    // layout root → resolved top cell; expanded child → that cell only.
+    if (isLayout) {
+        const bool selectingCell = item->data(0, RoleType).toInt() == ItemCell;
+        QString treeCell;
+        if (selectingCell) {
+            treeCell = item->data(0, RoleCellName).toString();
+            if (treeCell.isEmpty()) {
+                treeCell = item->text(0);
+            }
+        }
+        const QString groupName = getCurrentGroupName();
+        const QString resolvedTop =
+            selectingCell ? QString() : preferredKLayoutCellForRoot(viewPath, groupName);
+        startAsyncLayoutSnapshot(
+            viewPath,
+            layoutSnapshotFocusCell(selectingCell, treeCell, resolvedTop, groupName));
+        return;
+    }
+
     QString focusCell;
     if (item->data(0, RoleType).toInt() == ItemCell) {
         focusCell = item->data(0, RoleCellName).toString();
-    } else if (isLayout) {
-        focusCell = getCurrentGroupName();
-    }
-
-    if (isLayout) {
-        startAsyncLayoutSnapshot(viewPath, focusCell);
-        return;
     }
 
     m_snapshotView->setScene(loadCoreSnapshot(viewPath, view, symbolResolver, focusCell));
