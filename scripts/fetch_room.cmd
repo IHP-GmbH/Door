@@ -53,7 +53,16 @@ if exist "C:\Qt\Tools\mingw810_64\bin\g++.exe" (
     set "PATH=C:\Qt\Tools\mingw810_64\bin;%PATH%"
 )
 
-cmake -S "%ROOM_SRC%" -B "%ROOM_BUILD%" ^
+rem FindZLIB does not search the MinGW sysroot; room_oas needs the zlib that ships with the toolchain.
+set "ZLIB_ARGS="
+set "GXX="
+for /f "delims=" %%G in ('where g++ 2^>nul') do if not defined GXX set "GXX=%%G"
+if defined GXX for %%D in ("%GXX%\..\..\x86_64-w64-mingw32") do set "MINGW_SYSROOT=%%~fD"
+if defined MINGW_SYSROOT if exist "%MINGW_SYSROOT%\lib\libz.a" if exist "%MINGW_SYSROOT%\include\zlib.h" (
+    set "ZLIB_ARGS=-DZLIB_INCLUDE_DIR=%MINGW_SYSROOT:\=/%/include -DZLIB_LIBRARY=%MINGW_SYSROOT:\=/%/lib/libz.a"
+)
+
+cmake -S "%ROOM_SRC%" -B "%ROOM_BUILD%" %ZLIB_ARGS% ^
     -DCMAKE_BUILD_TYPE=Release ^
     -DROOM_BOOTSTRAP_CAPNP=OFF ^
     -DCAPNP_ROOT="%CAPNP_ROOT%" ^
