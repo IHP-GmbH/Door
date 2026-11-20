@@ -12,7 +12,7 @@ TEMPLATE = app
 
 CONFIG += c++17
 DEFINES += QT_NO_DEPRECATED_WARNINGS
-INCLUDEPATH += src/assistant
+INCLUDEPATH += src src/assistant
 
 LIBS += -lz
 win32:LIBS += -lcrypt32
@@ -110,6 +110,7 @@ HEADERS += \
     src/assistant/assistantchatpanel.h \
     src/assistant/securestore.h \
     src/assistant/roommcpclient.h \
+    src/room_python_path.h \
     src/python_console.h \
     src/klayout_tools.h \
     extension/variantmanager.h \

@@ -1,4 +1,4 @@
-# Ensure LibMan's Cap'n Proto prefix exists before configuring ROOM (FetchContent).
+# Ensure Door's Cap'n Proto prefix exists before configuring ROOM (FetchContent).
 
 function(libman_ensure_capnp)
     set(_capnp_header "${CMAKE_SOURCE_DIR}/capnp-install/include/capnp/message.h")

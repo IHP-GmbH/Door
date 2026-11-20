@@ -258,6 +258,7 @@ set(HEADERS
     lstream/lstreamcellwriter.h
     src/mainwindow.h
     src/python_console.h
+    src/room_python_path.h
     src/assistant/assistantmcp.h
     src/assistant/assistantagent.h
     src/assistant/assistantchatpanel.h
