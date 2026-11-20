@@ -25,8 +25,13 @@ History keeps up to 200 distinct commands for the session.
 On launch DOOR starts a persistent Python process from [`python/door_console.py`](../../python/door_console.py) (copied next to the binary on build; override with `DOOR_CONSOLE_PY / LIBMAN_CONSOLE_PY`):
 
 1. Finds `python` / `python3` (`DOOR_PYTHON / LIBMAN_PYTHON` overrides the executable).
-2. Prefers CommonDB’s package via `PYTHONPATH` (`DOOR_ROOM_PYTHON / LIBMAN_ROOM_PYTHON` or sibling `../CommonDB/python`).
-3. Sets `ROOM_C_DLL` when a built `room_c` / `libroom_c` is found next to DOOR or under CommonDB `build-python/python`.
+2. Prefers Room’s package via `PYTHONPATH`, in order:
+   - **Settings → Tools → Room → Path** (Room checkout or `…/Room/python`)
+   - `DOOR_ROOM_PYTHON` / `LIBMAN_ROOM_PYTHON`
+   - bundled `<dir(door.exe)>/python` (copied at build when `DOOR_DEPLOY_ROOM_PYTHON=ON`, default)
+   - sibling `../Room/python` or Door’s `.deps/Room/python` (FetchContent)
+   - If **Room → Path** is empty at startup and a package is found, Door writes that path into Tools automatically.
+3. Sets `ROOM_C_DLL` when a built `room_c` / `libroom_c` is found next to DOOR, under the bundled `python/room/`, or under Room `build-python/python`.
 
 The session namespace already has:
 

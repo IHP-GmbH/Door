@@ -1,4 +1,5 @@
 #include "roommcpclient.h"
+#include "room_python_path.h"
 
 #include <QCoreApplication>
 #include <QDir>
@@ -51,33 +52,7 @@ QString RoomMcpClient::findPython() const
 
 QString RoomMcpClient::findRoomPackageDir() const
 {
-    const QString appDir = QCoreApplication::applicationDirPath();
-    const QStringList candidates = {
-        QDir(appDir).filePath(QStringLiteral("../CommonDB/python")),
-        QDir(appDir).filePath(QStringLiteral("../../CommonDB/python")),
-        QDir(appDir).filePath(QStringLiteral("../../../CommonDB/python")),
-        QDir::cleanPath(QDir(appDir).filePath(QStringLiteral("../python"))),
-    };
-    for (const QString &c : candidates) {
-        if (QFileInfo::exists(QDir(c).filePath(QStringLiteral("room/__init__.py")))) {
-            return QDir(c).absolutePath();
-        }
-        if (QFileInfo::exists(QDir(c).filePath(QStringLiteral("room/mcp_server.py")))) {
-            return QDir(c).absolutePath();
-        }
-    }
-    // Same search as PythonConsole when ROOM is a sibling of LibMan.
-    QDir d(appDir);
-    for (int i = 0; i < 6; ++i) {
-        const QString sib = d.absoluteFilePath(QStringLiteral("../CommonDB/python"));
-        if (QFileInfo::exists(QDir(sib).filePath(QStringLiteral("room/__init__.py")))) {
-            return QDir(sib).absolutePath();
-        }
-        if (!d.cdUp()) {
-            break;
-        }
-    }
-    return {};
+    return resolveRoomPackageDir();
 }
 
 QString RoomMcpClient::findRoomCLibrary() const
@@ -92,12 +67,31 @@ QString RoomMcpClient::findRoomCLibrary() const
         QStringLiteral("room_c.so"),
 #endif
     };
-    const QStringList dirs = {
-        appDir,
-        QDir(appDir).filePath(QStringLiteral("python")),
-        QDir(appDir).filePath(QStringLiteral("../CommonDB/build/python")),
-        QDir(appDir).filePath(QStringLiteral("../../CommonDB/build/python")),
-    };
+    QStringList dirs;
+    dirs << appDir << QDir(appDir).filePath(QStringLiteral("python"));
+
+    const QString pkg = findRoomPackageDir();
+    if (!pkg.isEmpty()) {
+        dirs << pkg;
+        dirs << QDir(pkg).filePath(QStringLiteral("room"));
+        dirs << QDir(pkg).filePath(QStringLiteral("../build-python/python"));
+        dirs << QDir(pkg).filePath(QStringLiteral("../build/python"));
+        dirs << QDir(pkg).filePath(QStringLiteral("build-python/python"));
+        dirs << QDir(pkg).filePath(QStringLiteral("build/python"));
+    }
+
+    QDir walk(appDir);
+    for (int i = 0; i < 8; ++i) {
+        for (const char *build : {"build-python/python", "build/python"}) {
+            const QString leaf = QStringLiteral("Room/") + QString::fromUtf8(build);
+            dirs << walk.filePath(leaf);
+            dirs << QFileInfo(walk.filePath(QStringLiteral("../") + leaf)).absoluteFilePath();
+        }
+        dirs << walk.filePath(QStringLiteral(".deps/room-build/python"));
+        if (!walk.cdUp()) {
+            break;
+        }
+    }
     for (const QString &dir : dirs) {
         for (const QString &n : names) {
             const QString p = QDir(dir).filePath(n);

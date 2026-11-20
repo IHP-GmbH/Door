@@ -81,7 +81,7 @@ cmake -B build -DCORE_GIT_TAG=91705d7
 ## Local ROOM checkout (development)
 
 ```powershell
-cmake -B build -DLIBMAN_ROOM_SOURCE_DIR=C:/path/to/CommonDB
+cmake -B build -DLIBMAN_ROOM_SOURCE_DIR=C:/path/to/Room
 ```
 
 ## Installed ROOM (advanced)

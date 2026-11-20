@@ -1,4 +1,5 @@
 #include "python_console.h"
+#include "room_python_path.h"
 
 #include <QCoreApplication>
 #include <QDir>
@@ -161,26 +162,7 @@ QString PythonConsole::findPythonExecutable() const
 
 QString PythonConsole::findRoomPackageDir() const
 {
-    const QString env = qEnvironmentVariable("LIBMAN_ROOM_PYTHON").trimmed();
-    QStringList candidates;
-    if (!env.isEmpty()) {
-        candidates << env;
-    }
-
-    const QString appDir = QCoreApplication::applicationDirPath();
-    candidates << QDir(appDir).filePath(QStringLiteral("python"));
-    candidates << QDir(appDir).filePath(QStringLiteral("../CommonDB/python"));
-    candidates << QDir(appDir).filePath(QStringLiteral("../../CommonDB/python"));
-    candidates << QDir(appDir).filePath(QStringLiteral("../../../CommonDB/python"));
-    candidates << QDir(appDir).filePath(QStringLiteral(".deps/Room/python"));
-    candidates << QDir(appDir).filePath(QStringLiteral("../.deps/Room/python"));
-
-    for (const QString &dir : uniqueExistingDirs(candidates)) {
-        if (QFileInfo::exists(QDir(dir).filePath(QStringLiteral("room/__init__.py")))) {
-            return dir;
-        }
-    }
-    return {};
+    return resolveRoomPackageDir();
 }
 
 QString PythonConsole::findRoomCLibrary() const
@@ -201,12 +183,33 @@ QString PythonConsole::findRoomCLibrary() const
 #endif
 
     QStringList dirs;
-    dirs << appDir
-         << QDir(appDir).filePath(QStringLiteral("python"))
-         << QDir(appDir).filePath(QStringLiteral("_deps/commondb-build/python"))
-         << QDir(appDir).filePath(QStringLiteral("../_deps/commondb-build/python"))
-         << QDir(appDir).filePath(QStringLiteral("../../CommonDB/build-python/python"))
-         << QDir(appDir).filePath(QStringLiteral("../../CommonDB/build/python"));
+    dirs << appDir << QDir(appDir).filePath(QStringLiteral("python"));
+
+    // Prefer DLL next to the configured Room package / checkout.
+    // pkg is the dir that contains room/__init__.py (…/python); room_c often
+    // lives inside the package folder itself (…/python/room/).
+    const QString pkg = findRoomPackageDir();
+    if (!pkg.isEmpty()) {
+        dirs << pkg;
+        dirs << QDir(pkg).filePath(QStringLiteral("room"));
+        dirs << QDir(pkg).filePath(QStringLiteral("../build-python/python"));
+        dirs << QDir(pkg).filePath(QStringLiteral("../build/python"));
+        dirs << QDir(pkg).filePath(QStringLiteral("build-python/python"));
+        dirs << QDir(pkg).filePath(QStringLiteral("build/python"));
+    }
+
+    QDir walk(appDir);
+    for (int i = 0; i < 8; ++i) {
+        for (const char *build : {"build-python/python", "build/python"}) {
+            const QString leaf = QStringLiteral("Room/") + QString::fromUtf8(build);
+            dirs << walk.filePath(leaf);
+            dirs << QFileInfo(walk.filePath(QStringLiteral("../") + leaf)).absoluteFilePath();
+        }
+        dirs << walk.filePath(QStringLiteral(".deps/room-build/python"));
+        if (!walk.cdUp()) {
+            break;
+        }
+    }
 
     for (const QString &dir : uniqueExistingDirs(dirs)) {
         for (const QString &name : names) {
@@ -240,6 +243,7 @@ QString PythonConsole::findDriverScript() const
         QDir(appDir).filePath(QStringLiteral("../../../python/libman_console.py")),
         // cmake build/ next to source tree
         QDir(appDir).filePath(QStringLiteral("../../Door/python/door_console.py")),
+        QDir(appDir).filePath(QStringLiteral("../../Door/python/libman_console.py")),
         QDir(appDir).filePath(QStringLiteral("../../LibMan/python/door_console.py")),
         QDir(appDir).filePath(QStringLiteral("../../LibMan/python/libman_console.py")),
     };

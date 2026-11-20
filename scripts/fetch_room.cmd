@@ -17,7 +17,7 @@ if defined LIBMAN_ROOM_SOURCE_DIR (
     )
 )
 
-set "ROOM_SRC=%ROOT%\.deps\CommonDB"
+set "ROOM_SRC=%ROOT%\.deps\Room"
 if exist "%ROOM_SRC%\src\room_paths.h" (
     echo Using existing ROOM checkout: %ROOM_SRC%
     goto :configure

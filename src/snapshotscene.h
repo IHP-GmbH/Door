@@ -51,7 +51,7 @@ QString layoutRoomPathFromEmModel(const QString &emmodelPath, QString *topCellOu
 /*! True when path is a ROOM layout suitable for emsetup/layout snapshot. */
 bool isRoomLayoutSnapshotPath(const QString &path);
 
-/*! True for GDSII/OASIS paths; the layout snapshot imports them through CommonDB. */
+/*! True for GDSII/OASIS paths; the layout snapshot imports them through ROOM. */
 bool isForeignLayoutSnapshotPath(const QString &path);
 
 constexpr qint64 kMaxGdsSnapshotBytes = 512LL * 1024 * 1024;

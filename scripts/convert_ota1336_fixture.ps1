@@ -2,7 +2,7 @@
 # Requires: CommonDB build with xschem_to_core (build-tools/xschem_to_core.exe).
 param(
     [string]$RepoUrl = "https://github.com/KrzysztofHerman/IHP__OTA1336.git",
-    [string]$XschemToCore = "$PSScriptRoot\..\..\CommonDB\build-tools\xschem_to_core.exe"
+    [string]$XschemToCore = "$PSScriptRoot\..\..\Room\build-tools\xschem_to_core.exe"
 )
 
 $ErrorActionPreference = "Stop"

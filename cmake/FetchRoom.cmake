@@ -35,11 +35,15 @@ function(_libman_add_room_aliases)
     endif()
 endfunction()
 
+# DOOR_ROOM_SOURCE_DIR: checkout used for C++ link and optional Python deploy.
+unset(DOOR_ROOM_SOURCE_DIR)
+
 if(LIBMAN_ROOM_SOURCE_DIR)
   if(NOT IS_DIRECTORY "${LIBMAN_ROOM_SOURCE_DIR}")
     message(FATAL_ERROR "LIBMAN_ROOM_SOURCE_DIR is not a directory: ${LIBMAN_ROOM_SOURCE_DIR}")
   endif()
   message(STATUS "Using local ROOM tree: ${LIBMAN_ROOM_SOURCE_DIR}")
+  set(DOOR_ROOM_SOURCE_DIR "${LIBMAN_ROOM_SOURCE_DIR}")
   _libman_configure_room_subproject()
   add_subdirectory("${LIBMAN_ROOM_SOURCE_DIR}" "${CMAKE_BINARY_DIR}/_deps/commondb-build")
   _libman_add_room_aliases()
@@ -47,6 +51,7 @@ elseif(LIBMAN_FETCH_ROOM)
   _libman_configure_room_subproject()
 
   set(_ROOM_SOURCE_DIR "${CMAKE_SOURCE_DIR}/.deps/Room")
+  set(DOOR_ROOM_SOURCE_DIR "${_ROOM_SOURCE_DIR}")
 
   FetchContent_Declare(
       commondb
@@ -69,3 +74,6 @@ if(NOT TARGET ROOM::room)
 endif()
 
 message(STATUS "ROOM linked (ROOM::room, ROOM::room_utils, ROOM::room_oas)")
+if(DOOR_ROOM_SOURCE_DIR)
+  message(STATUS "ROOM sources: ${DOOR_ROOM_SOURCE_DIR}")
+endif()

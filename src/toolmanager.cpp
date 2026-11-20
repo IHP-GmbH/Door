@@ -138,6 +138,23 @@ void ToolManager::init()
 
     item->addSubProperty(subitem);
 
+    // Room checkout (or Room/python) for the Python Command Line / MCP.
+    QtVariantProperty *room =
+        m_vmSettings->addProperty(QtVariantPropertyManager::groupTypeId(), tr("Room"));
+    m_pbSettings->addProperty(room);
+
+    QtVariantProperty *roomPath =
+        m_vmSettings->addProperty(VariantManager::filePathTypeId(), QStringLiteral("Path"));
+    roomPath->setWhatsThis(QStringLiteral("folder"));
+    roomPath->setToolTip(tr(
+        "Path to the Room checkout (…/Room) or its python package (…/Room/python).\n"
+        "Used by the Python Command Line (`import room`) and Assistant MCP.\n"
+        "Leave empty to auto-detect a sibling Room folder."));
+    roomPath->setValue(m_properties->exists(QStringLiteral("RoomPath"))
+                           ? m_properties->get<QString>(QStringLiteral("RoomPath"))
+                           : QString());
+    room->addSubProperty(roomPath);
+
     // Assistant (LLM agent) — same keys as EMStudio Preferences → Assistant.
     QtVariantProperty *assistant =
         m_vmSettings->addProperty(QtVariantPropertyManager::groupTypeId(), tr("Assistant"));
@@ -250,6 +267,14 @@ void ToolManager::on_btnOk_clicked()
             }
         }
 
+        if (q->propertyName() == QLatin1String("Room")) {
+            for (QtProperty *p : q->subProperties()) {
+                if (p->propertyName() == QLatin1String("Path")) {
+                    m_properties->set(QStringLiteral("RoomPath"), p->valueText().trimmed());
+                }
+            }
+        }
+
         if (q->propertyName() == QLatin1String("Assistant")
             || q->propertyName() == QLatin1String("PDK")) {
             QList<QtProperty *> l = q->subProperties();
@@ -275,7 +300,7 @@ void ToolManager::on_btnOk_clicked()
         }
     }
 
-    close();
+    accept();
 }
 
 /*!**********************************************************************************************************************
@@ -283,7 +308,7 @@ void ToolManager::on_btnOk_clicked()
  ***********************************************************************************************************************/
 void ToolManager::on_btnCancel_clicked()
 {
-    close();
+    reject();
 }
 
 /*!**********************************************************************************************************************

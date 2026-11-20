@@ -41,6 +41,7 @@
 #include "snapshotview.h"
 #include "snapshotscene.h"
 #include "python_console.h"
+#include "room_python_path.h"
 
 #include <QtConcurrent/QtConcurrent>
 #include <QFutureWatcher>
@@ -399,6 +400,12 @@ void MainWindow::closeEvent(QCloseEvent *event)
     settings.setValue("Editor", editor);
     settings.setValue("PdfReader", pdfReader);
 
+    QString roomPath;
+    if (m_properties->exists(QStringLiteral("RoomPath"))) {
+        roomPath = m_properties->get<QString>(QStringLiteral("RoomPath")).trimmed();
+    }
+    settings.setValue(QStringLiteral("RoomPath"), roomPath);
+
     QString schematicSymbolFormat = QStringLiteral("ROOM");
     if (m_properties->exists(QStringLiteral("SchematicSymbolFormat"))) {
         schematicSymbolFormat =
@@ -543,6 +550,19 @@ void MainWindow::loadSettings()
     }
 
     m_properties->set("PdfReader", pdfReader);
+
+    {
+        QString roomPath = settings.value(QStringLiteral("RoomPath")).toString().trimmed();
+        // Seed Tools → Room → Path when empty so the UI shows the auto-detected package.
+        if (roomPath.isEmpty()) {
+            const QString discovered = discoverRoomPackageDir();
+            if (!discovered.isEmpty()) {
+                roomPath = discovered;
+                settings.setValue(QStringLiteral("RoomPath"), roomPath);
+            }
+        }
+        m_properties->set(QStringLiteral("RoomPath"), roomPath);
+    }
 
     QString schematicSymbolFormat = QStringLiteral("ROOM");
     if (settings.contains(QStringLiteral("SchematicSymbolFormat"))) {
@@ -719,9 +739,28 @@ QMap<QString, QString> MainWindow::getCurrentLibraries() const
  **********************************************************************************************************************/
 void MainWindow::on_actionTools_triggered()
 {
-    ToolManager(this, m_properties).exec();
+    if (ToolManager(this, m_properties).exec() != QDialog::Accepted) {
+        return;
+    }
+
+    // Persist RoomPath immediately so PythonConsole / MCP pick it up without restarting Door.
+    {
+        QSettings settings(getSettingsHeaderName());
+        settings.beginGroup(QStringLiteral("Tools"));
+        settings.setValue(QStringLiteral("RoomPath"),
+                          m_properties->exists(QStringLiteral("RoomPath"))
+                              ? m_properties->get<QString>(QStringLiteral("RoomPath")).trimmed()
+                              : QString());
+        settings.endGroup();
+    }
+
     persistAssistantSettings();
     configureAssistantAgent();
+
+    if (m_pythonConsole) {
+        m_pythonConsole->stop();
+        m_pythonConsole->start();
+    }
 }
 
 /*!*******************************************************************************************************************

@@ -403,4 +403,35 @@ foreach(_converter gds_to_room xschem_to_room qucs_to_room oas_to_room json_to_r
         )
     endif()
 endforeach()
+
+# Bundle Room's Python package next to door.exe so CML `import room` works
+# without Preferences → Room → Path (FetchContent → .deps/Room, or local checkout).
+option(DOOR_DEPLOY_ROOM_PYTHON
+    "Copy Room python/room (+ room_c) next to door.exe on build" ON)
+if(DOOR_DEPLOY_ROOM_PYTHON)
+    if(NOT DOOR_ROOM_SOURCE_DIR)
+        message(WARNING "DOOR_DEPLOY_ROOM_PYTHON=ON but DOOR_ROOM_SOURCE_DIR is unset; skip Python deploy")
+    elseif(NOT EXISTS "${DOOR_ROOM_SOURCE_DIR}/python/room/__init__.py")
+        message(WARNING "DOOR_DEPLOY_ROOM_PYTHON=ON but ${DOOR_ROOM_SOURCE_DIR}/python/room is missing; skip")
+    else()
+        add_custom_command(TARGET door POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E make_directory
+                    "$<TARGET_FILE_DIR:door>/python"
+            COMMAND ${CMAKE_COMMAND} -E copy_directory
+                    "${DOOR_ROOM_SOURCE_DIR}/python/room"
+                    "$<TARGET_FILE_DIR:door>/python/room"
+            COMMENT "Deploying Room Python package next to door"
+        )
+        if(TARGET room_c)
+            add_dependencies(door room_c)
+            add_custom_command(TARGET door POST_BUILD
+                COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                        "$<TARGET_FILE:room_c>"
+                        "$<TARGET_FILE_DIR:door>/python/room/$<TARGET_FILE_NAME:room_c>"
+                COMMENT "Deploying room_c next to bundled Room Python package"
+            )
+        endif()
+        message(STATUS "DOOR: will deploy Room Python from ${DOOR_ROOM_SOURCE_DIR}/python")
+    endif()
+endif()
 endif()

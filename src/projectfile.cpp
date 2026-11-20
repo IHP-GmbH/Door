@@ -23,6 +23,7 @@
 #endif
 
 #include "mainwindow.h"
+#include "room_python_path.h"
 #include "ui_mainwindow.h"
 
 #include "property.h"
@@ -1230,17 +1231,34 @@ void MainWindow::launchSchematicTool(const QString &tool, const QString &viewPat
                 return abs;
             };
 
-            const QString commonDbRoot = QFileInfo(QDir(workDir).filePath(QStringLiteral("../../CommonDB")))
-                                             .absoluteFilePath();
-            if(QFileInfo::exists(commonDbRoot)) {
-                env.insert(QStringLiteral("COMMONDB_ROOT"), QDir::toNativeSeparators(commonDbRoot));
+            QString roomRoot;
+            if (m_properties && m_properties->exists(QStringLiteral("RoomPath"))) {
+                const QString pkg = roomPackageDirFromConfiguredPath(
+                    m_properties->get<QString>(QStringLiteral("RoomPath")));
+                if (!pkg.isEmpty()) {
+                    // ROOM_ROOT is the Room checkout (parent of python/).
+                    roomRoot = QFileInfo(QDir(pkg).filePath(QStringLiteral(".."))).absoluteFilePath();
+                }
+            }
+            if (roomRoot.isEmpty()) {
+                const QString cand =
+                    QFileInfo(QDir(workDir).filePath(QStringLiteral("../../Room"))).absoluteFilePath();
+                if (QFileInfo::exists(cand)) {
+                    roomRoot = cand;
+                }
+            }
+            if (!roomRoot.isEmpty()) {
+                const QString native = QDir::toNativeSeparators(roomRoot);
+                env.insert(QStringLiteral("ROOM_ROOT"), native);
+                // WSL/xschem scripts still read COMMONDB_ROOT; point it at Room.
+                env.insert(QStringLiteral("COMMONDB_ROOT"), native);
             }
 
             env.insert(QStringLiteral("WSLENV"),
                        QStringLiteral(
                            "CORE_PRIMITIVE_LIBS_FILE/p:CORE_PRIMITIVE_LIBS/p:CORE_PRIMITIVE_LIB/p:"
                            "ROOM_PRIMITIVE_LIBS_FILE/p:ROOM_PRIMITIVE_LIBS/p:ROOM_PRIMITIVE_LIB/p:"
-                           "LIBMAN_TECH_LIBRARY/u:XSCHEM_PRIMITIVE_CACHE/p:COMMONDB_ROOT/p:"
+                           "LIBMAN_TECH_LIBRARY/u:XSCHEM_PRIMITIVE_CACHE/p:COMMONDB_ROOT/p:ROOM_ROOT/p:"
                            "XSCHEM_OPEN_CORE/p:XSCHEM_OPEN_ROOM/p:XSCHEM_OPEN_FILE/p:"
                            "PDK_ROOT/u:PDK/u:XSCHEM_NETLIST_DIR/u"));
             proc.setProcessEnvironment(env);

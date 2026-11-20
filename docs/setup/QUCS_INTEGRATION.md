@@ -25,12 +25,12 @@ DOOR (Windows)
 
 ### Qucs-S (ROOM build)
 
-Checkout and build sibling to CommonDB/DOOR:
+Checkout and build sibling to Room/DOOR:
 
 ```text
 parent/
   Qucs-S-coredb/   ← https://github.com/adatsuk/Qucs-S-coredb
-  CommonDB/
+  Room/
   DOOR/
   XSchem-coredb/   ← optional second schematic tool
 ```

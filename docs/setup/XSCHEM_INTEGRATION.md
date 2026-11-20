@@ -35,14 +35,14 @@ DOOR (Windows)
 Inside WSL (from your **XSchem-coredb** checkout):
 
 1. **Xschem** built and on `PATH` (`xschem` command works in a WSL terminal)
-2. **coretcl.so** built for WSL (from CommonDB):
+2. **coretcl.so** built for WSL (from Room):
 
    ```bash
    cd /path/to/XSchem-coredb
    bash build-core-tcl.sh
    ```
 
-   Expects **CommonDB** as a sibling directory (`../CommonDB`) unless `COMMONDB_ROOT` is set. Produces `integrations/coretcl.so` and `CommonDB/build-wsl/.../coretcl.so`.
+   Expects **Room** as a sibling directory (`../Room`) unless `ROOM_ROOT` / `COMMONDB_ROOT` is set. Produces `integrations/coretcl.so` and `Room/build-wsl/.../coretcl.so`.
 
 3. Test manually:
 
@@ -55,8 +55,8 @@ Inside WSL (from your **XSchem-coredb** checkout):
 ```text
 parent/
   XSchem-coredb/   ← https://github.com/adatsuk/XSchem-coredb (launchers, xschemrc, core.tcl)
-  CommonDB/        ← sibling checkout (coretcl.so build)
-  DOOR/          ← optional; Windows app
+  Room/            ← sibling checkout (coretcl.so build)
+  DOOR/            ← optional; Windows app
   KLayout-roomdb/  ← optional; https://github.com/adatsuk/KLayout-roomdb (mroom plugin)
   Qucs-S-coredb/   ← optional; https://github.com/adatsuk/Qucs-S-coredb (ROOM in Qucs-S)
 ```
@@ -78,8 +78,8 @@ Scripts live in the **XSchem-coredb** repo (not DOOR):
 |-----------|-------------------------|
 | `open-xschem-wsl.bat` | `%~dp0` + `wsl --cd` → runs `./open-xschem-wsl.sh` in `integrations/` |
 | `open-xschem-wsl.sh` | Parent of `integrations/` = **Xschem root** → `xschemrc` |
-| `xschemrc` | `[info script]` = Xschem root; `../CommonDB` = **ROOM root** |
-| `core.tcl` | Same; searches `integrations/coretcl.so` and `CommonDB/build-wsl/...` |
+| `xschemrc` | `[info script]` = Xschem root; `../Room` = **ROOM root** |
+| `core.tcl` | Same; searches `integrations/coretcl.so` and `Room/build-wsl/...` |
 
 Optional environment overrides (WSL / Tcl):
 
@@ -87,7 +87,7 @@ Optional environment overrides (WSL / Tcl):
 |----------|---------|
 | `XSCHEM_ROOT` / `XSCHEM_HOME` | Xschem repo root |
 | `XSCHEM_RC` | Alternate `xschemrc` file |
-| `COMMONDB_ROOT` / `CORE_ROOT` | CommonDB checkout (non-sibling layout) |
+| `ROOM_ROOT` / `COMMONDB_ROOT` / `CORE_ROOT` | Room checkout (non-sibling layout) |
 | `XSCHEM_SRC` | Source tree for `build-xschem.sh` (default: `XSchem-coredb/xschem-src`) |
 
 DOOR sets these when opening a schematic/symbol view with attached tech or design libraries:

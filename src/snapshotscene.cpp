@@ -980,6 +980,14 @@ bool looksLikeRoomLayoutPath(const QString &path)
         && !name.endsWith(QLatin1String(".abstract.room"));
 }
 
+/*! After LibMan → Door rename, absolute EmModel paths may still point at Documents/LibMan. */
+QString remapLegacyLibManPath(QString path)
+{
+    path.replace(QStringLiteral("Documents/LibMan"), QStringLiteral("Documents/Door"));
+    path.replace(QStringLiteral("Documents\\LibMan"), QStringLiteral("Documents\\Door"));
+    return path;
+}
+
 QString resolveBeside(const QString &baseFile, const QString &maybeRelative)
 {
     const QString trimmed = maybeRelative.trimmed();
@@ -987,10 +995,20 @@ QString resolveBeside(const QString &baseFile, const QString &maybeRelative)
         return {};
     }
     const QFileInfo fi(trimmed);
+    QString resolved;
     if (fi.isAbsolute()) {
-        return QFileInfo(trimmed).absoluteFilePath();
+        resolved = QFileInfo(trimmed).absoluteFilePath();
+    } else {
+        resolved = QFileInfo(QDir(QFileInfo(baseFile).absolutePath()).filePath(trimmed)).absoluteFilePath();
     }
-    return QFileInfo(QDir(QFileInfo(baseFile).absolutePath()).filePath(trimmed)).absoluteFilePath();
+    if (QFileInfo::exists(resolved)) {
+        return resolved;
+    }
+    const QString remapped = remapLegacyLibManPath(resolved);
+    if (remapped != resolved && QFileInfo::exists(remapped)) {
+        return remapped;
+    }
+    return resolved;
 }
 
 } // namespace

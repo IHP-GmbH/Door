@@ -1,4 +1,4 @@
-// oasReader.cpp — hierarchy reads go through CommonDB's room::OasReader (oas_to_room).
+// oasReader.cpp — hierarchy reads go through ROOM's room::OasReader (oas_to_room).
 #include "oasReader.h"
 
 #ifndef LIBMAN_NO_ROOM
@@ -80,7 +80,7 @@ bool oasReader::readHierarchy(LayoutHierarchy &out,
 #else
     Q_UNUSED(onCell);
     Q_UNUSED(onRename);
-    m_errorList << QStringLiteral("OASIS hierarchy requires ROOM (CommonDB) support.");
+    m_errorList << QStringLiteral("OASIS hierarchy requires ROOM support.");
     return false;
 #endif
 }
