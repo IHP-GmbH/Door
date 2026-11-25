@@ -102,7 +102,17 @@ On Windows with MinGW, run `scripts\mkcapnp.cmd` from the repo root first, then 
 
 ### Main Interface
 
-![](https://github.com/IHP-GmbH/Door/blob/main/pics/main.png)
+DOOR’s main window is built around a familiar library-manager layout, with ROOM-backed cell views and tool bridges in one place:
+
+- **Project → Categories → Cell → View** — navigate libraries and cell views the way users expect from commercial flows; filter by category and open schematic, symbol, or layout views.
+- **Snapshot** — preview the selected schematic, symbol, or layout without leaving the manager.
+- **Messages & Command Line** — follow status output and drive common actions from a Python-capable command line (see [Python console](docs/setup/PYTHON_CONSOLE.md)).
+- **Assistant (LLM agent)** — optional side panel for interactive help while browsing design data.
+- **Tool integration** — open views with KLayout (layout / ROOM), Xschem / Qucs-S (schematic), and keep design data in ROOM `.room` files ([ROOM](https://github.com/IHP-GmbH/Room), [KLayout](docs/setup/KLAYOUT_INTEGRATION.md), [Xschem](docs/setup/XSCHEM_INTEGRATION.md)).
+
+<p align="center">
+  <img src="pics/main.png" alt="DOOR main interface — library manager with Project/Categories/Cell/View, snapshot, command line, and Assistant" width="900">
+</p>
 
 ### Doxygen cooment style support and documentation generation
 
