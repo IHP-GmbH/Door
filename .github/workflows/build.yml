@@ -639,3 +639,57 @@ jobs:
           name: door-rhel8
           path: door-rhel8.tar.gz
           if-no-files-found: error
+
+  # ============================================================
+  # Smoke-test scripts/install_room_stack_from_ci.sh
+  # ============================================================
+
+  test-stack-installer:
+    name: test install_room_stack_from_ci.sh
+    needs: [build-ubuntu24]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      actions: read
+
+    steps:
+      - name: Checkout sources
+        uses: actions/checkout@v4
+
+      - name: Offline self-test + syntax
+        run: |
+          chmod +x scripts/install_room_stack_from_ci.sh
+          bash scripts/install_room_stack_from_ci.sh --self-test
+
+      - name: Dry-run plan (ubuntu24 / door)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          bash scripts/install_room_stack_from_ci.sh \
+            --yes --force-ci --flavor ubuntu24 --tools door --dry-run
+
+      - name: Download door-linux-ubuntu24 from this workflow
+        uses: actions/download-artifact@v4
+        with:
+          name: door-linux-ubuntu24
+          path: /tmp/door-ci-artifact
+
+      - name: Install Door from local CI tar
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DOOR_PREFIX: /tmp/room-stack/door
+          BIN_DIR: /tmp/room-stack/bin
+        run: |
+          set -euo pipefail
+          TAR="$(find /tmp/door-ci-artifact -type f \( -name '*.tar.gz' -o -name '*.tgz' \) | head -n1)"
+          test -n "$TAR"
+          echo "Using tar: $TAR"
+          bash scripts/install_room_stack_from_ci.sh \
+            --yes --force-ci --flavor ubuntu24 --tools door \
+            --from-tar "$TAR"
+          test -e "$BIN_DIR/door"
+          test -x "$(readlink -f "$BIN_DIR/door")"
+          echo "Installed door -> $(readlink -f "$BIN_DIR/door")"
+          ls -la "$DOOR_PREFIX" | head
+          test -f "$DOOR_PREFIX/BUNDLE_SOURCE.txt"
+          cat "$DOOR_PREFIX/BUNDLE_SOURCE.txt"

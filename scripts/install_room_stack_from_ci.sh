@@ -5,26 +5,33 @@
 # Usage (interactive):
 #   bash scripts/install_room_stack_from_ci.sh
 #
-# Non-interactive / CI-ish:
+# Non-interactive:
 #   DOOR_PREFIX=/opt/door KLAYOUT_PREFIX=/opt/klayout \
 #   QUCS_PREFIX=/opt/qucs-s XSCHEM_PREFIX=/opt/xschem \
 #   BIN_DIR=/usr/local/bin bash scripts/install_room_stack_from_ci.sh --yes
 #
 # Options:
-#   --yes          no prompts (use env PREFIX_* / defaults)
-#   --wait         if CI is running, wait until it finishes (max WAIT_MAX_SEC)
-#   --force-ci     install even if a CI run is in progress
-#   --flavor F     force artifact flavor: ubuntu24 | rocky8
+#   --yes            no prompts (use env PREFIX_* / defaults)
+#   --wait           if CI is running, wait until it finishes (max WAIT_MAX_SEC)
+#   --force-ci       install even if a CI run is in progress
+#   --flavor F       force artifact flavor: ubuntu24 | rocky8
+#   --tools LIST     comma list: door,qucs,xschem,klayout (default: all)
+#   --dry-run        print plan / CI status; do not download or install
+#   --self-test      run offline mapping assertions and exit
+#   --from-tar FILE  install one tool from a local .tar.gz (requires --tools with one entry)
 #
-# Requires: gh (authenticated), curl/python3, tar, unzip-capable python.
-# PAT needs actions:read on the artifact repos (classic public_repo is enough
-# for these public repos).
+# Requires: gh (except --self-test), python3, tar.
+# PAT needs actions:read on artifact repos (classic public_repo is enough for public repos).
 set -euo pipefail
 
 YES=0
 WAIT_CI=0
 FORCE_CI=0
+DRY_RUN=0
+SELF_TEST=0
 FLAVOR_FORCE=""
+TOOLS_CSV="door,qucs,xschem,klayout"
+FROM_TAR=""
 WAIT_MAX_SEC="${WAIT_MAX_SEC:-3600}"
 POLL_SEC="${POLL_SEC:-30}"
 
@@ -39,7 +46,7 @@ WORKFLOW_XSCHEM="${WORKFLOW_XSCHEM:-CI}"
 WORKFLOW_KLAYOUT="${WORKFLOW_KLAYOUT:-CI}"
 
 usage() {
-  sed -n '2,25p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '2,28p' "$0" | sed 's/^# \{0,1\}//'
   exit 0
 }
 
@@ -48,7 +55,11 @@ while [[ $# -gt 0 ]]; do
     -y|--yes) YES=1 ;;
     --wait) WAIT_CI=1 ;;
     --force-ci) FORCE_CI=1 ;;
+    --dry-run) DRY_RUN=1 ;;
+    --self-test) SELF_TEST=1 ;;
     --flavor) FLAVOR_FORCE="${2:-}"; shift ;;
+    --tools) TOOLS_CSV="${2:-}"; shift ;;
+    --from-tar) FROM_TAR="${2:-}"; shift ;;
     -h|--help) usage ;;
     *) echo "Unknown option: $1" >&2; exit 2 ;;
   esac
@@ -59,7 +70,6 @@ die() { echo "ERROR: $*" >&2; exit 1; }
 info() { echo "==> $*"; }
 need() { command -v "$1" >/dev/null 2>&1 || die "missing dependency: $1"; }
 
-need gh
 need python3
 need tar
 
@@ -99,10 +109,7 @@ detect_flavor() {
   esac
 }
 
-FLAVOR="$(detect_flavor)"
-info "Detected install flavor: $FLAVOR"
-
-# artifact name per tool / flavor
+# artifact name per tool / flavor (FLAVOR must be set)
 artifact_for() {
   local tool="$1"
   case "$tool/$FLAVOR" in
@@ -124,6 +131,7 @@ repo_for() {
     qucs) echo "$REPO_QUCS" ;;
     xschem) echo "$REPO_XSCHEM" ;;
     klayout) echo "$REPO_KLAYOUT" ;;
+    *) die "unknown tool: $1" ;;
   esac
 }
 
@@ -135,6 +143,81 @@ workflow_for() {
     klayout) echo "$WORKFLOW_KLAYOUT" ;;
   esac
 }
+
+prefix_for() {
+  case "$1" in
+    door) echo "$DOOR_PREFIX" ;;
+    qucs) echo "$QUCS_PREFIX" ;;
+    xschem) echo "$XSCHEM_PREFIX" ;;
+    klayout) echo "$KLAYOUT_PREFIX" ;;
+  esac
+}
+
+parse_tools() {
+  local raw="$1" t
+  TOOLS=()
+  IFS=',' read -r -a _parts <<<"$raw"
+  for t in "${_parts[@]}"; do
+    t="$(echo "$t" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')"
+    [[ -z "$t" ]] && continue
+    case "$t" in
+      door|qucs|xschem|klayout) TOOLS+=("$t") ;;
+      qucs-s) TOOLS+=("qucs") ;;
+      *) die "unknown tool in --tools: $t" ;;
+    esac
+  done
+  [[ ${#TOOLS[@]} -gt 0 ]] || die "--tools list is empty"
+}
+
+run_self_test() {
+  info "Running offline self-test"
+  local fail=0
+  assert_eq() {
+    local got="$1" want="$2" msg="$3"
+    if [[ "$got" != "$want" ]]; then
+      echo "FAIL: $msg (got='$got' want='$want')" >&2
+      fail=1
+    else
+      echo "OK: $msg"
+    fi
+  }
+
+  FLAVOR_FORCE=ubuntu24
+  FLAVOR="$(detect_flavor)"
+  assert_eq "$FLAVOR" ubuntu24 "force ubuntu24"
+  assert_eq "$(artifact_for door)" door-linux-ubuntu24 "door ubuntu24 artifact"
+  assert_eq "$(artifact_for qucs)" qucs-s-ubuntu24 "qucs ubuntu24 artifact"
+  assert_eq "$(artifact_for xschem)" xschem-ubuntu24 "xschem ubuntu24 artifact"
+  assert_eq "$(artifact_for klayout)" klayout-linux-ubuntu24 "klayout ubuntu24 artifact"
+
+  FLAVOR_FORCE=rocky8
+  FLAVOR="$(detect_flavor)"
+  assert_eq "$FLAVOR" rocky8 "force rocky8"
+  assert_eq "$(artifact_for door)" door-rhel8 "door rocky8 artifact"
+  assert_eq "$(artifact_for qucs)" qucs-s-rocky8 "qucs rocky8 artifact"
+  assert_eq "$(artifact_for xschem)" xschem-rocky8 "xschem rocky8 artifact"
+  assert_eq "$(artifact_for klayout)" klayout-rocky8 "klayout rocky8 artifact"
+
+  assert_eq "$(repo_for door)" "$REPO_DOOR" "door repo"
+  assert_eq "$(repo_for klayout)" "$REPO_KLAYOUT" "klayout repo"
+
+  bash -n "$0" || { echo "FAIL: bash -n" >&2; fail=1; }
+  [[ "$fail" -eq 0 ]] || die "self-test failed"
+  info "Self-test passed"
+  exit 0
+}
+
+if [[ "$SELF_TEST" -eq 1 ]]; then
+  # FLAVOR unused until assertions set FLAVOR_FORCE
+  FLAVOR=ubuntu24
+  run_self_test
+fi
+
+need gh
+parse_tools "$TOOLS_CSV"
+FLAVOR="$(detect_flavor)"
+info "Detected install flavor: $FLAVOR"
+info "Tools: ${TOOLS[*]}"
 
 prompt_dir() {
   local label="$1" default="$2" out
@@ -150,25 +233,50 @@ prompt_dir() {
   fi
 }
 
-# Defaults: portable trees under /usr/local/opt + wrappers in /usr/local/bin
 DEFAULT_ROOT="${DEFAULT_ROOT:-/usr/local/opt}"
 DEFAULT_BIN="${DEFAULT_BIN:-/usr/local/bin}"
 
-DOOR_PREFIX="${DOOR_PREFIX:-$(prompt_dir "Door install directory" "$DEFAULT_ROOT/door")}"
-QUCS_PREFIX="${QUCS_PREFIX:-$(prompt_dir "Qucs-S install directory" "$DEFAULT_ROOT/qucs-s")}"
-XSCHEM_PREFIX="${XSCHEM_PREFIX:-$(prompt_dir "Xschem install directory" "$DEFAULT_ROOT/xschem")}"
-KLAYOUT_PREFIX="${KLAYOUT_PREFIX:-$(prompt_dir "KLayout install directory" "$DEFAULT_ROOT/klayout")}"
+want_tool() {
+  local t="$1" x
+  for x in "${TOOLS[@]}"; do
+    [[ "$x" == "$t" ]] && return 0
+  done
+  return 1
+}
+
+DOOR_PREFIX="${DOOR_PREFIX:-}"
+QUCS_PREFIX="${QUCS_PREFIX:-}"
+XSCHEM_PREFIX="${XSCHEM_PREFIX:-}"
+KLAYOUT_PREFIX="${KLAYOUT_PREFIX:-}"
+BIN_DIR="${BIN_DIR:-}"
+
+if want_tool door; then
+  DOOR_PREFIX="${DOOR_PREFIX:-$(prompt_dir "Door install directory" "$DEFAULT_ROOT/door")}"
+fi
+if want_tool qucs; then
+  QUCS_PREFIX="${QUCS_PREFIX:-$(prompt_dir "Qucs-S install directory" "$DEFAULT_ROOT/qucs-s")}"
+fi
+if want_tool xschem; then
+  XSCHEM_PREFIX="${XSCHEM_PREFIX:-$(prompt_dir "Xschem install directory" "$DEFAULT_ROOT/xschem")}"
+fi
+if want_tool klayout; then
+  KLAYOUT_PREFIX="${KLAYOUT_PREFIX:-$(prompt_dir "KLayout install directory" "$DEFAULT_ROOT/klayout")}"
+fi
 BIN_DIR="${BIN_DIR:-$(prompt_dir "Symlink directory (PATH)" "$DEFAULT_BIN")}"
 
-info "Door     -> $DOOR_PREFIX"
-info "Qucs-S   -> $QUCS_PREFIX"
-info "Xschem   -> $XSCHEM_PREFIX"
-info "KLayout  -> $KLAYOUT_PREFIX"
+for t in "${TOOLS[@]}"; do
+  info "$t -> $(prefix_for "$t")"
+done
 info "PATH bin -> $BIN_DIR"
+
+if [[ -n "$FROM_TAR" ]]; then
+  [[ ${#TOOLS[@]} -eq 1 ]] || die "--from-tar requires exactly one tool in --tools"
+  [[ -f "$FROM_TAR" ]] || die "--from-tar file not found: $FROM_TAR"
+fi
 
 ci_busy_repos() {
   local tool repo wf json
-  for tool in door qucs xschem klayout; do
+  for tool in "${TOOLS[@]}"; do
     repo="$(repo_for "$tool")"
     wf="$(workflow_for "$tool")"
     json="$(gh run list -R "$repo" --workflow "$wf" --branch main --limit 15 \
@@ -195,7 +303,7 @@ wait_for_ci() {
   while true; do
     lines="$(ci_busy_repos || true)"
     if [[ -z "${lines// }" ]]; then
-      info "No running CI on Door/Qucs/Xschem/KLayout main."
+      info "No running CI for selected tools on main."
       return 0
     fi
     if [[ "$FORCE_CI" -eq 1 ]]; then
@@ -267,7 +375,6 @@ PY
   tar_path="$(find "$stage" -type f \( -name '*.tar.gz' -o -name '*.tgz' \) | head -n1 || true)"
   [[ -n "$tar_path" ]] || die "no .tar.gz inside artifact zip for $artifact"
 
-  # Clear previous install contents (keep nothing stale).
   find "$out_dir" -mindepth 1 -maxdepth 1 ! -name '.download' -exec rm -rf {} +
   tar -xzf "$tar_path" -C "$out_dir"
   rm -rf "$stage"
@@ -281,17 +388,22 @@ PY
   } >"$out_dir/BUNDLE_SOURCE.txt"
 }
 
+install_from_tar() {
+  local out_dir="$1" tar_path="$2"
+  mkdir -p "$out_dir"
+  find "$out_dir" -mindepth 1 -maxdepth 1 -exec rm -rf {} +
+  tar -xzf "$tar_path" -C "$out_dir"
+  {
+    echo "source=local-tar"
+    echo "tar=$tar_path"
+  } >"$out_dir/BUNDLE_SOURCE.txt"
+}
+
 find_exec() {
   local root="$1"
   shift
-  local name
+  local name hit
   for name in "$@"; do
-    local hit
-    hit="$(find "$root" -type f -name "$name" 2>/dev/null | head -n1 || true)"
-    if [[ -n "$hit" && -x "$hit" ]]; then
-      echo "$hit"
-      return 0
-    fi
     hit="$(find "$root" -type f -name "$name" 2>/dev/null | head -n1 || true)"
     if [[ -n "$hit" ]]; then
       chmod +x "$hit" 2>/dev/null || true
@@ -312,9 +424,13 @@ link_into_bin() {
 install_one() {
   local tool="$1" prefix="$2"
   local repo artifact exe
-  repo="$(repo_for "$tool")"
-  artifact="$(artifact_for "$tool")"
-  download_artifact "$repo" "$artifact" "$prefix"
+  if [[ -n "$FROM_TAR" ]]; then
+    install_from_tar "$prefix" "$FROM_TAR"
+  else
+    repo="$(repo_for "$tool")"
+    artifact="$(artifact_for "$tool")"
+    download_artifact "$repo" "$artifact" "$prefix"
+  fi
 
   case "$tool" in
     door)
@@ -340,33 +456,49 @@ install_one() {
   esac
 }
 
+if [[ "$DRY_RUN" -eq 1 ]]; then
+  info "Dry-run plan:"
+  for t in "${TOOLS[@]}"; do
+    echo "  $t: repo=$(repo_for "$t") artifact=$(artifact_for "$t") prefix=$(prefix_for "$t")"
+  done
+  echo "  BIN_DIR=$BIN_DIR"
+  if [[ -n "$FROM_TAR" ]]; then
+    echo "  FROM_TAR=$FROM_TAR"
+  fi
+  lines="$(ci_busy_repos || true)"
+  if [[ -n "${lines// }" ]]; then
+    echo "CI busy:"
+    echo "$lines"
+  else
+    echo "CI busy: (none for selected tools)"
+  fi
+  info "Dry-run OK"
+  exit 0
+fi
+
 wait_for_ci
 
-# May need sudo for /usr/local
 ensure_writable() {
   local d="$1"
   mkdir -p "$d" 2>/dev/null && [[ -w "$d" ]] && return 0
   if [[ "$(id -u)" -ne 0 ]]; then
-    info "Need root to write $d — re-run prefix of this script with sudo, or choose a home path."
+    info "Need root to write $d — choose a home path or re-run with sudo."
     die "cannot write $d"
   fi
   mkdir -p "$d"
 }
 
-ensure_writable "$DOOR_PREFIX"
-ensure_writable "$QUCS_PREFIX"
-ensure_writable "$XSCHEM_PREFIX"
-ensure_writable "$KLAYOUT_PREFIX"
+for t in "${TOOLS[@]}"; do
+  ensure_writable "$(prefix_for "$t")"
+done
 ensure_writable "$BIN_DIR"
 
-install_one door "$DOOR_PREFIX"
-install_one qucs "$QUCS_PREFIX"
-install_one xschem "$XSCHEM_PREFIX"
-install_one klayout "$KLAYOUT_PREFIX"
+for t in "${TOOLS[@]}"; do
+  install_one "$t" "$(prefix_for "$t")"
+done
 
 info "Done."
 echo
 echo "Flavor:  $FLAVOR"
 echo "PATH:    export PATH=\"$BIN_DIR:\$PATH\""
-echo "Try:     door --help; qucs-s --version; xschem -v; klayout -v"
-echo "Sources: $DOOR_PREFIX/BUNDLE_SOURCE.txt (and siblings)"
+echo "Tools:   ${TOOLS[*]}"
