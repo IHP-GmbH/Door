@@ -61,7 +61,7 @@ QVector<TechLayer> parseKLayoutLyp(const QString &lypPath)
     while (!xml.atEnd()) {
         xml.readNext();
         if (xml.isStartElement()) {
-            const QStringRef tag = xml.name();
+            const auto tag = xml.name();
             if (tag == QLatin1String("properties") || tag == QLatin1String("group-members")) {
                 stack.push_back({});
             } else if (!stack.isEmpty() && tag == QLatin1String("name")) {
@@ -70,7 +70,7 @@ QVector<TechLayer> parseKLayoutLyp(const QString &lypPath)
                 stack.last().source = xml.readElementText().trimmed();
             }
         } else if (xml.isEndElement()) {
-            const QStringRef tag = xml.name();
+            const auto tag = xml.name();
             if ((tag == QLatin1String("properties") || tag == QLatin1String("group-members"))
                 && !stack.isEmpty()) {
                 const Pending p = stack.takeLast();
