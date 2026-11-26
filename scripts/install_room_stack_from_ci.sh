@@ -1341,6 +1341,24 @@ find_exec() {
   return 1
 }
 
+# Put Door-bundled ROOM converters on PATH (EMStudio ROOM_TO_GDS, Door import, …).
+link_door_converters_into_bin() {
+  local prefix="$1"
+  local name found
+  local -a names=(
+    room_to_gds gds_to_room room_to_xschem room_to_qucs room_to_json
+    xschem_to_room qucs_to_room oas_to_room json_to_room
+  )
+  for name in "${names[@]}"; do
+    found="$(find "$prefix" -type f -name "$name" 2>/dev/null | head -n1 || true)"
+    if [[ -z "$found" || ! -f "$found" ]]; then
+      continue
+    fi
+    chmod +x "$found" 2>/dev/null || true
+    link_into_bin "$found" "$name"
+  done
+}
+
 # Write a small absolute-path launcher (NOT a symlink).
 # Symlinks break *-run.sh scripts that use dirname "$0" / BASH_SOURCE (they resolve
 # to <prefix>/bin and then look for bin/bin/<tool>).
@@ -1527,6 +1545,7 @@ repair_installed_tool() {
       attach_room_python "$prefix" || true
       exe="$(find_exec "$prefix" door-run.sh door)"
       link_into_bin "$exe" door
+      link_door_converters_into_bin "$prefix"
       ;;
     qucs)
       exe="$(find_exec "$prefix" qucs-s-run.sh qucs-s qucs)" || return 0
@@ -1667,6 +1686,7 @@ install_one() {
       # Re-resolve after possible patch/attach.
       exe="$(find_exec "$prefix" door-run.sh door)"
       link_into_bin "$exe" door
+      link_door_converters_into_bin "$prefix"
       ;;
     qucs)
       exe="$(find_exec "$prefix" qucs-s-run.sh qucs-s qucs)" \
