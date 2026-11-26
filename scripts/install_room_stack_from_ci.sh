@@ -24,8 +24,11 @@
 #   --tools LIST     door,qucs,xschem,klayout,emstudio (or 'all')
 #                    Without --tools: interactive prompt (default all); with --yes: all
 #   --update         only check/install updates for tools already under --prefix
-#                    (or only --tools if given). Skips tools whose CI artifact_id matches
-#                    BUNDLE_SOURCE.txt. Implies no interactive tool menu.
+#                    (or only --tools if given). Skips download when CI artifact_id matches
+#                    BUNDLE_SOURCE.txt, but still applies local repairs (e.g. klayout-run env).
+#                    Implies no interactive tool menu.
+#   --delete         remove selected tools from --prefix (payload + bin launchers).
+#                    Requires --tools LIST. Does not download. Cannot combine with --update.
 #   --no-seed-settings  do not write Door QSettings (~/.config/DOOR.conf) defaults
 #   --seed-settings     force writing Door tool paths even if settings already exist
 #   --dry-run        print plan / CI status; do not download or install
@@ -48,6 +51,7 @@ DRY_RUN=0
 SELF_TEST=0
 FORGET_TOKEN=0
 UPDATE_MODE=0
+DELETE_MODE=0
 SEED_SETTINGS=1
 FORCE_SEED_SETTINGS=0
 FLAVOR_FORCE=""
@@ -58,6 +62,7 @@ PREFIX_OPT=""
 WAIT_MAX_SEC="${WAIT_MAX_SEC:-3600}"
 POLL_SEC="${POLL_SEC:-30}"
 ALL_TOOLS=(door qucs xschem klayout emstudio)
+UPDATE_SKIPPED=()
 # Fallback gh release if api.github.com is rate-limited / unreachable.
 GH_VERSION_FALLBACK="${GH_VERSION_FALLBACK:-2.82.1}"
 TOKEN_STORE_DIR="${ROOM_STACK_CONFIG_DIR:-$HOME/.config/room-stack}"
@@ -77,7 +82,7 @@ WORKFLOW_KLAYOUT="${WORKFLOW_KLAYOUT:-CI}"
 WORKFLOW_EMSTUDIO="${WORKFLOW_EMSTUDIO:-Build EMStudio}"
 
 usage() {
-  sed -n '2,48p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '2,52p' "$0" | sed 's/^# \{0,1\}//'
   exit 0
 }
 
@@ -90,6 +95,7 @@ while [[ $# -gt 0 ]]; do
     --self-test) SELF_TEST=1 ;;
     --forget-token) FORGET_TOKEN=1 ;;
     --update) UPDATE_MODE=1 ;;
+    --delete) DELETE_MODE=1 ;;
     --no-seed-settings) SEED_SETTINGS=0 ;;
     --seed-settings) SEED_SETTINGS=1; FORCE_SEED_SETTINGS=1 ;;
     --flavor) FLAVOR_FORCE="${2:-}"; shift ;;
@@ -528,6 +534,32 @@ discover_installed_tools() {
   return 0
 }
 
+# Remove one tool payload under lib/room-stack/<tool> and its bin launcher(s).
+delete_one_tool() {
+  local tool="$1"
+  local payload bin
+  payload="$(tool_payload_dir "$tool")"
+  bin="${BIN_DIR:-$INSTALL_PREFIX/bin}/$(bin_name_for_tool "$tool")"
+
+  if [[ -d "$payload" ]]; then
+    info "Removing payload $payload"
+    rm -rf "$payload"
+  else
+    info "No payload for $tool at $payload"
+  fi
+  if [[ -e "$bin" || -L "$bin" ]]; then
+    info "Removing launcher $bin"
+    rm -f "$bin"
+  fi
+  if [[ "$tool" == "emstudio" ]]; then
+    local em_alt="${BIN_DIR:-$INSTALL_PREFIX/bin}/EMStudio"
+    if [[ -e "$em_alt" || -L "$em_alt" ]]; then
+      info "Removing launcher $em_alt"
+      rm -f "$em_alt"
+    fi
+  fi
+}
+
 read_bundle_field() {
   local file="$1" key="$2"
   [[ -f "$file" ]] || return 1
@@ -867,9 +899,22 @@ run_self_test() {
   echo "artifact_id=111" >/tmp/room-prefix-test/lib/room-stack/qucs/BUNDLE_SOURCE.txt
   echo "artifact_id=222" >/tmp/room-prefix-test/lib/room-stack/klayout/BUNDLE_SOURCE.txt
   BIN_DIR=/tmp/room-prefix-test/bin
+  mkdir -p "$BIN_DIR"
+  echo '#!/bin/sh' >"$BIN_DIR/klayout"
+  chmod +x "$BIN_DIR/klayout"
   discover_installed_tools || fail=1
   assert_eq "${TOOLS[*]}" "qucs klayout" "discover installed tools"
   assert_eq "$(read_bundle_field /tmp/room-prefix-test/lib/room-stack/qucs/BUNDLE_SOURCE.txt artifact_id)" "111" "read bundle field"
+
+  delete_one_tool klayout
+  if [[ -d /tmp/room-prefix-test/lib/room-stack/klayout || -e /tmp/room-prefix-test/bin/klayout ]]; then
+    echo "FAIL: delete_one_tool klayout left files behind" >&2
+    fail=1
+  else
+    echo "OK: delete_one_tool removes payload + bin"
+  fi
+  [[ -d /tmp/room-prefix-test/lib/room-stack/qucs ]] \
+    || { echo "FAIL: delete_one_tool removed sibling tool" >&2; fail=1; }
   rm -rf /tmp/room-prefix-test
 
   case "$(uname -m)" in
@@ -927,9 +972,18 @@ if [[ "$SELF_TEST" -eq 1 ]]; then
   run_self_test
 fi
 
-ensure_gh
-# --from-tar with a local file still uses gh for CI-busy checks unless dry-run exits earlier
-ensure_gh_auth
+if [[ "$DELETE_MODE" -eq 1 && "$UPDATE_MODE" -eq 1 ]]; then
+  die "--delete cannot be combined with --update"
+fi
+if [[ "$DELETE_MODE" -eq 1 && -n "$FROM_TAR" ]]; then
+  die "--delete cannot be combined with --from-tar"
+fi
+
+if [[ "$DELETE_MODE" -eq 0 ]]; then
+  ensure_gh
+  # --from-tar with a local file still uses gh for CI-busy checks unless dry-run exits earlier
+  ensure_gh_auth
+fi
 
 prompt_dir() {
   local label="$1" default="$2" out
@@ -953,10 +1007,10 @@ want_tool() {
   return 1
 }
 
-# Resolve prefix early — --update needs it to discover installed tools.
+# Resolve prefix early — --update/--delete need it to discover installed tools.
 INSTALL_PREFIX="${INSTALL_PREFIX:-${PREFIX_OPT:-}}"
 if [[ -z "$INSTALL_PREFIX" ]]; then
-  if [[ "$UPDATE_MODE" -eq 1 ]]; then
+  if [[ "$UPDATE_MODE" -eq 1 || "$DELETE_MODE" -eq 1 ]]; then
     if INSTALL_PREFIX="$(guess_install_prefix)"; then
       info "Detected existing install prefix: $INSTALL_PREFIX"
     elif [[ "$YES" -eq 1 ]]; then
@@ -972,10 +1026,14 @@ INSTALL_PREFIX="${INSTALL_PREFIX%/}"
 BIN_DIR="${BIN_DIR:-$INSTALL_PREFIX/bin}"
 
 # Tool selection:
+#   --delete            → requires --tools LIST
 #   --update (no --tools) → only tools already present under prefix
 #   --update --tools …   → only the listed tools (install if missing / update if newer)
 #   otherwise            → interactive / --tools / all as before
-if [[ "$UPDATE_MODE" -eq 1 ]]; then
+if [[ "$DELETE_MODE" -eq 1 ]]; then
+  [[ "$TOOLS_EXPLICIT" -eq 1 ]] || die "--delete requires --tools LIST (e.g. --tools klayout)"
+  parse_tools "$TOOLS_CSV"
+elif [[ "$UPDATE_MODE" -eq 1 ]]; then
   if [[ "$TOOLS_EXPLICIT" -eq 1 ]]; then
     parse_tools "$TOOLS_CSV"
   else
@@ -1023,28 +1081,64 @@ for t in "${TOOLS[@]}"; do
 done
 info "PATH bin -> $BIN_DIR"
 
+# --delete: remove payloads + launchers and exit (no CI / download).
+if [[ "$DELETE_MODE" -eq 1 ]]; then
+  if [[ "$DRY_RUN" -eq 1 ]]; then
+    info "Dry-run delete plan:"
+    for t in "${TOOLS[@]}"; do
+      echo "  delete $t payload=$(tool_payload_dir "$t") bin=$BIN_DIR/$(bin_name_for_tool "$t")"
+    done
+    info "Dry-run OK"
+    exit 0
+  fi
+  if [[ "$YES" -ne 1 ]]; then
+    echo "About to delete: ${TOOLS[*]}" >&2
+    echo "  prefix: $INSTALL_PREFIX" >&2
+    read -r -p "Continue? [y/N]: " _ans || true
+    case "${_ans:-}" in
+      y|Y|yes|YES) ;;
+      *) die "delete aborted" ;;
+    esac
+  fi
+  for t in "${TOOLS[@]}"; do
+    delete_one_tool "$t"
+  done
+  info "Deleted: ${TOOLS[*]}"
+  echo
+  echo "Prefix:  $INSTALL_PREFIX"
+  echo "Removed: ${TOOLS[*]}"
+  echo "Reinstall with: $0 --yes --prefix \"$INSTALL_PREFIX\" --tools $(IFS=,; echo "${TOOLS[*]}")"
+  exit 0
+fi
+
 # --update: drop tools that already match the latest CI artifact_id.
+# Up-to-date tools are kept in UPDATE_SKIPPED for local repairs (launcher env, +x, …).
 if [[ "$UPDATE_MODE" -eq 1 ]]; then
   _status=""
   _pending=()
+  UPDATE_SKIPPED=()
   info "Checking CI artifacts for updates…"
   for t in "${TOOLS[@]}"; do
     if _status="$(tool_update_status "$t")"; then
       info "$t: $_status"
       _pending+=("$t")
     else
-      info "$t: $_status — skip"
+      info "$t: $_status — skip download (will still apply local repairs)"
+      UPDATE_SKIPPED+=("$t")
     fi
   done
   if [[ ${#_pending[@]} -eq 0 ]]; then
-    info "All selected tools are up to date."
+    info "All selected tools are up to date (downloads skipped)."
     if [[ "$DRY_RUN" -eq 1 ]]; then
       info "Dry-run OK"
+      exit 0
     fi
-    exit 0
+    # Fall through with empty TOOLS — repairs run after helper functions are defined.
+    TOOLS=()
+  else
+    TOOLS=("${_pending[@]}")
+    info "Will update/install: ${TOOLS[*]}"
   fi
-  TOOLS=("${_pending[@]}")
-  info "Will update/install: ${TOOLS[*]}"
 fi
 
 if [[ -n "$FROM_TAR" ]]; then
@@ -1403,6 +1497,57 @@ PY
   fi
 }
 
+# Local-only fixes for an already-installed tool (no re-download).
+repair_installed_tool() {
+  local tool="$1"
+  local prefix exe
+  prefix="$(prefix_for "$tool")"
+  [[ -d "$prefix" ]] || {
+    info "repair $tool: payload missing at $prefix — skip"
+    return 0
+  }
+  info "Applying local repairs for $tool"
+  case "$tool" in
+    door)
+      exe="$(find_exec "$prefix" door-run.sh door)" || return 0
+      patch_run_script_symlink_safe "$exe"
+      attach_room_python "$prefix" || true
+      exe="$(find_exec "$prefix" door-run.sh door)"
+      link_into_bin "$exe" door
+      ;;
+    qucs)
+      exe="$(find_exec "$prefix" qucs-s-run.sh qucs-s qucs)" || return 0
+      patch_run_script_symlink_safe "$exe"
+      link_into_bin "$exe" qucs-s
+      ;;
+    xschem)
+      exe="$(find_exec "$prefix" xschem-run.sh xschem)" || return 0
+      patch_run_script_symlink_safe "$exe"
+      repair_xschem_integrations "$prefix" || true
+      link_into_bin "$exe" xschem
+      ;;
+    klayout)
+      exe="$(find_exec "$prefix" klayout-run.sh klayout)" || return 0
+      patch_run_script_symlink_safe "$exe"
+      repair_klayout_run_env "$prefix"
+      exe="$(find_exec "$prefix" klayout-run.sh klayout)"
+      link_into_bin "$exe" klayout
+      ;;
+    emstudio)
+      exe="$(find_exec "$prefix" EMStudio emstudio)" || return 0
+      restore_payload_exec_bits "$prefix"
+      patch_run_script_symlink_safe "$exe"
+      if [[ -f "$(dirname "$exe")/EMStudio.bin" ]]; then
+        chmod +x "$(dirname "$exe")/EMStudio.bin"
+      fi
+      link_into_bin "$exe" emstudio
+      if [[ "$(basename "$exe")" != "emstudio" ]]; then
+        link_into_bin "$exe" EMStudio
+      fi
+      ;;
+  esac
+}
+
 # Ensure klayout-run.sh puts bundle root + pymod on the search paths so mroom
 # (libklayout_*.so next to the binary) and `import pya` work after Actions zip extract.
 repair_klayout_run_env() {
@@ -1554,6 +1699,9 @@ if [[ "$DRY_RUN" -eq 1 ]]; then
   for t in "${TOOLS[@]}"; do
     echo "  $t: repo=$(repo_for "$t") artifact=$(artifact_for "$t") prefix=$(prefix_for "$t")"
   done
+  if [[ "$UPDATE_MODE" -eq 1 && ${#UPDATE_SKIPPED[@]} -gt 0 ]]; then
+    echo "  local-repair (up-to-date): ${UPDATE_SKIPPED[*]}"
+  fi
   echo "  BIN_DIR=$BIN_DIR"
   if [[ -n "$FROM_TAR" ]]; then
     echo "  FROM_TAR=$FROM_TAR"
@@ -1569,8 +1717,6 @@ if [[ "$DRY_RUN" -eq 1 ]]; then
   exit 0
 fi
 
-wait_for_ci
-
 ensure_writable() {
   local d="$1"
   mkdir -p "$d" 2>/dev/null && [[ -w "$d" ]] && return 0
@@ -1581,16 +1727,30 @@ ensure_writable() {
   mkdir -p "$d"
 }
 
-ensure_writable "$INSTALL_PREFIX"
-ensure_writable "$INSTALL_PREFIX/lib/room-stack"
-for t in "${TOOLS[@]}"; do
-  ensure_writable "$(prefix_for "$t")"
-done
-ensure_writable "$BIN_DIR"
+# Up-to-date tools still get launcher / +x / integration fixes.
+if [[ "$UPDATE_MODE" -eq 1 && ${#UPDATE_SKIPPED[@]} -gt 0 ]]; then
+  ensure_writable "$BIN_DIR"
+  for t in "${UPDATE_SKIPPED[@]}"; do
+    repair_installed_tool "$t"
+  done
+fi
 
-for t in "${TOOLS[@]}"; do
-  install_one "$t" "$(prefix_for "$t")"
-done
+if [[ ${#TOOLS[@]} -gt 0 ]]; then
+  wait_for_ci
+
+  ensure_writable "$INSTALL_PREFIX"
+  ensure_writable "$INSTALL_PREFIX/lib/room-stack"
+  for t in "${TOOLS[@]}"; do
+    ensure_writable "$(prefix_for "$t")"
+  done
+  ensure_writable "$BIN_DIR"
+
+  for t in "${TOOLS[@]}"; do
+    install_one "$t" "$(prefix_for "$t")"
+  done
+elif [[ "$UPDATE_MODE" -eq 1 ]]; then
+  info "No downloads needed — local repairs applied where relevant."
+fi
 
 # Migrate legacy ~/.config/LIBAMN.conf → DOOR.conf and seed Tools paths from this install.
 door_settings_conf() {
@@ -1801,6 +1961,11 @@ echo
 echo "Prefix:  $INSTALL_PREFIX"
 echo "Flavor:  $FLAVOR"
 echo "PATH:    export PATH=\"$BIN_DIR:\$PATH\""
-echo "Tools:   ${TOOLS[*]}"
+if [[ ${#TOOLS[@]} -gt 0 ]]; then
+  echo "Tools:   ${TOOLS[*]}"
+fi
+if [[ ${#UPDATE_SKIPPED[@]} -gt 0 ]]; then
+  echo "Repaired:${UPDATE_SKIPPED[*]}"
+fi
 echo "Tree:    $INSTALL_PREFIX/bin/  +  $INSTALL_PREFIX/lib/room-stack/<tool>/"
 echo "Settings:$(door_settings_conf)"
