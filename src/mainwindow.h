@@ -370,6 +370,7 @@ private:
     void                                initIcons();
 
     void                                initRecentProjectMenu();
+    void                                initBrowserDeleteShortcuts();
 
     bool                                createNewFile(const QString &);
     bool                                isStateChanged() const;

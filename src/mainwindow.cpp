@@ -206,6 +206,8 @@ MainWindow::MainWindow(const QString &projFile, const QString &runDir, QWidget *
     m_ui->listGroups->setSelectionMode(QAbstractItemView::ExtendedSelection);
     m_ui->listViews->setSelectionMode(QAbstractItemView::ExtendedSelection);
 
+    initBrowserDeleteShortcuts();
+
     m_ui->treeLibs->setContextMenuPolicy(Qt::CustomContextMenu);
     m_ui->listViews->setContextMenuPolicy(Qt::CustomContextMenu);
     m_ui->listGroups->setContextMenuPolicy(Qt::CustomContextMenu);
@@ -862,6 +864,35 @@ void MainWindow::initRecentProjectMenu()
     }
 
     updateRecentProjectActions();
+}
+
+/*!*******************************************************************************************************************
+ * \brief Wire Delete/Backspace on library / cell / view / category browsers.
+ *
+ * Context-menu Delete actions used WidgetShortcut on MainWindow, so the key never
+ * fired while focus was in the lists. Bind permanently on each browser widget.
+ **********************************************************************************************************************/
+void MainWindow::initBrowserDeleteShortcuts()
+{
+    auto bindDelete = [this](QWidget *widget, void (MainWindow::*slot)()) {
+        if (!widget) {
+            return;
+        }
+        auto addKey = [&](const QKeySequence &seq) {
+            QAction *act = new QAction(widget);
+            act->setShortcut(seq);
+            act->setShortcutContext(Qt::WidgetWithChildrenShortcut);
+            connect(act, &QAction::triggered, this, slot);
+            widget->addAction(act);
+        };
+        addKey(QKeySequence::Delete);
+        addKey(QKeySequence(Qt::Key_Backspace));
+    };
+
+    bindDelete(m_ui->treeLibs, &MainWindow::removeSelectedProject);
+    bindDelete(m_ui->listGroups, &MainWindow::removeSelectedGroup);
+    bindDelete(m_ui->listViews, &MainWindow::removeSelectedView);
+    bindDelete(m_ui->listCategories, &MainWindow::removeSelectedCategory);
 }
 
 /*!*******************************************************************************************************************
