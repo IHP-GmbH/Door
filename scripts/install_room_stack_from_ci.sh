@@ -1548,6 +1548,7 @@ repair_installed_tool() {
       link_door_converters_into_bin "$prefix"
       ;;
     qucs)
+      repair_qucs_run_env "$prefix"
       exe="$(find_exec "$prefix" qucs-s-run.sh qucs-s qucs)" || return 0
       patch_run_script_symlink_safe "$exe"
       link_into_bin "$exe" qucs-s
@@ -1578,6 +1579,79 @@ repair_installed_tool() {
       fi
       ;;
   esac
+}
+
+# Older Qucs bundles ship a naked ELF at bin/qucs-s; running it without
+# qucs-s-run.sh misses QT_PLUGIN_PATH → "Could not find Qt platform plugin xcb".
+# Rename ELF to qucs-s.bin and install wrappers that set Qt plugin paths.
+repair_qucs_run_env() {
+  local prefix="$1"
+  local bundle run_sh bin_elf bin_wrap bin_real plugins
+  run_sh="$(find "$prefix" -type f -name 'qucs-s-run.sh' 2>/dev/null | head -n1 || true)"
+  bin_elf="$(find "$prefix" -type f -path '*/bin/qucs-s' 2>/dev/null | head -n1 || true)"
+  bin_real="$(find "$prefix" -type f -name 'qucs-s.bin' 2>/dev/null | head -n1 || true)"
+
+  if [[ -n "$run_sh" ]]; then
+    bundle="$(cd "$(dirname "$run_sh")" && pwd)"
+  elif [[ -n "$bin_elf" ]]; then
+    bundle="$(cd "$(dirname "$bin_elf")/.." && pwd)"
+  elif [[ -n "$bin_real" ]]; then
+    bundle="$(cd "$(dirname "$bin_real")/.." && pwd)"
+  else
+    return 0
+  fi
+
+  plugins="$bundle/plugins/platforms"
+  if [[ ! -f "$plugins/libqxcb.so" && ! -f "$plugins/libqxcb.so.0" ]]; then
+    # linuxdeployqt sometimes keeps the soname without .0
+    if ! ls "$plugins"/libqxcb.so* >/dev/null 2>&1; then
+      echo "WARNING: Qucs Qt xcb plugin missing under $bundle/plugins/platforms" >&2
+      echo "WARNING: Re-install qucs from a fresh CI bundle, or install host Qt xcb packages." >&2
+    fi
+  fi
+
+  bin_wrap="$bundle/bin/qucs-s"
+  if [[ -f "$bin_wrap" ]] && ! head -n1 "$bin_wrap" 2>/dev/null | grep -q '^#!'; then
+    # Naked ELF — move aside and wrap.
+    info "Wrapping naked Qucs ELF as qucs-s.bin ($bin_wrap)"
+    mv -f "$bin_wrap" "$bundle/bin/qucs-s.bin"
+    bin_real="$bundle/bin/qucs-s.bin"
+  fi
+  [[ -x "$bundle/bin/qucs-s.bin" ]] || bin_real="$(find "$bundle" -type f -name 'qucs-s.bin' 2>/dev/null | head -n1 || true)"
+  [[ -n "$bin_real" && -f "$bin_real" ]] || return 0
+  chmod +x "$bin_real" 2>/dev/null || true
+
+  write_qucs_launcher() {
+    local out="$1"
+    cat >"$out" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+_src="${BASH_SOURCE[0]}"
+while [[ -L "$_src" ]]; do
+  _dir="$(cd -P "$(dirname "$_src")" && pwd)"
+  _src="$(readlink "$_src")"
+  [[ "$_src" != /* ]] && _src="$_dir/$_src"
+done
+HERE="$(cd -P "$(dirname "$_src")" && pwd)"
+if [[ -x "$HERE/bin/qucs-s.bin" ]]; then
+  DIR="$HERE"
+elif [[ -x "$HERE/qucs-s.bin" ]]; then
+  DIR="$(cd -P "$HERE/.." && pwd)"
+else
+  DIR="$HERE"
+fi
+export LD_LIBRARY_PATH="$DIR/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+export QT_PLUGIN_PATH="$DIR/plugins${QT_PLUGIN_PATH:+:$QT_PLUGIN_PATH}"
+export QT_QPA_PLATFORM_PLUGIN_PATH="$DIR/plugins/platforms${QT_QPA_PLATFORM_PLUGIN_PATH:+:$QT_QPA_PLATFORM_PLUGIN_PATH}"
+export Qucs_sShareDir="$DIR/share/qucs-s"
+exec "$DIR/bin/qucs-s.bin" "$@"
+EOF
+    chmod +x "$out"
+  }
+
+  write_qucs_launcher "$bundle/qucs-s-run.sh"
+  write_qucs_launcher "$bundle/bin/qucs-s"
+  info "Qucs launcher repaired ($bundle/qucs-s-run.sh)"
 }
 
 # Ensure klayout-run.sh puts bundle root + pymod on the search paths so mroom
@@ -1689,6 +1763,7 @@ install_one() {
       link_door_converters_into_bin "$prefix"
       ;;
     qucs)
+      repair_qucs_run_env "$prefix"
       exe="$(find_exec "$prefix" qucs-s-run.sh qucs-s qucs)" \
         || die "qucs-s binary not found under $prefix"
       patch_run_script_symlink_safe "$exe"
