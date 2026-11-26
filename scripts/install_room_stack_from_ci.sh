@@ -13,7 +13,7 @@
 #   ./install_room_stack_from_ci.sh --yes --prefix "$HOME/door"
 #   # or per-tool overrides:
 #   DOOR_PREFIX=/tmp/door/lib/room-stack/door BIN_DIR=/tmp/door/bin \
-#     ./install_room_stack_from_ci.sh --yes --tools doo
+#     ./install_room_stack_from_ci.sh --yes --tools door
 #
 # Options:
 #   --yes            no prompts (use env / defaults; tools = all unless --tools)
@@ -1666,7 +1666,7 @@ install_one() {
       attach_room_python "$prefix"
       # Re-resolve after possible patch/attach.
       exe="$(find_exec "$prefix" door-run.sh door)"
-      link_into_bin "$exe" doo
+      link_into_bin "$exe" door
       ;;
     qucs)
       exe="$(find_exec "$prefix" qucs-s-run.sh qucs-s qucs)" \
