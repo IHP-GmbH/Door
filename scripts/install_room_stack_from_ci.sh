@@ -637,7 +637,7 @@ detect_flavor() {
 
   # Prefer glibc: ubuntu24 bundles need ≥ 2.34; rocky8/ubuntu22 need ≥ 2.28.
   if [[ -n "$glibc" ]] && version_lt "$glibc" "2.34"; then
-    echo "Host glibc $glibc < 2.34 — using rocky8 / ubuntu22 bundles." >&2
+    echo "Host glibc $glibc < 2.34 — using rocky8 bundles (glibc 2.28)." >&2
     echo rocky8
     return
   fi
@@ -689,9 +689,9 @@ artifact_for() {
     xschem/rocky8)       echo xschem-rocky8 ;;
     klayout/ubuntu24)    echo klayout-linux-ubuntu24 ;;
     klayout/rocky8)      echo klayout-rocky8 ;;
-    # EMStudio ships portable ubuntu22/ubuntu24 bundles (no rocky8 yet).
+    # EMStudio: ubuntu22 needs glibc 2.35 — do NOT use it on Rocky 8 (2.28).
     emstudio/ubuntu24)   echo emstudio-linux-ubuntu24 ;;
-    emstudio/rocky8)     echo emstudio-linux-ubuntu22 ;;
+    emstudio/rocky8)     echo emstudio-linux-rocky8 ;;
     *) die "no artifact mapping for $tool / $FLAVOR" ;;
   esac
 }
@@ -842,7 +842,7 @@ run_self_test() {
   assert_eq "$(artifact_for qucs)" qucs-s-rocky8 "qucs rocky8 artifact"
   assert_eq "$(artifact_for xschem)" xschem-rocky8 "xschem rocky8 artifact"
   assert_eq "$(artifact_for klayout)" klayout-rocky8 "klayout rocky8 artifact"
-  assert_eq "$(artifact_for emstudio)" emstudio-linux-ubuntu22 "emstudio rocky8->ubuntu22 artifact"
+  assert_eq "$(artifact_for emstudio)" emstudio-linux-rocky8 "emstudio rocky8 artifact"
 
   assert_eq "$(repo_for door)" "$REPO_DOOR" "door repo"
   assert_eq "$(repo_for klayout)" "$REPO_KLAYOUT" "klayout repo"
