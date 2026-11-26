@@ -1403,6 +1403,46 @@ PY
   fi
 }
 
+# Ensure klayout-run.sh puts bundle root + pymod on the search paths so mroom
+# (libklayout_*.so next to the binary) and `import pya` work after Actions zip extract.
+repair_klayout_run_env() {
+  local prefix="$1"
+  local run_sh bundle
+  run_sh="$(find "$prefix" -type f -name 'klayout-run.sh' 2>/dev/null | head -n1 || true)"
+  [[ -n "$run_sh" && -f "$run_sh" ]] || return 0
+  bundle="$(cd "$(dirname "$run_sh")" && pwd)"
+
+  if grep -q 'PYTHONPATH=.*pymod' "$run_sh" 2>/dev/null \
+      && grep -q 'LD_LIBRARY_PATH="$DIR:$DIR/lib' "$run_sh" 2>/dev/null; then
+    info "KLayout launcher env OK ($run_sh)"
+    return 0
+  fi
+
+  info "Repairing KLayout launcher env in $run_sh"
+  cat >"$run_sh" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+_src="${BASH_SOURCE[0]}"
+while [[ -L "$_src" ]]; do
+  _dir="$(cd -P "$(dirname "$_src")" && pwd)"
+  _src="$(readlink "$_src")"
+  [[ "$_src" != /* ]] && _src="$_dir/$_src"
+done
+DIR="$(cd -P "$(dirname "$_src")" && pwd)"
+export LD_LIBRARY_PATH="$DIR:$DIR/lib:$DIR/db_plugins:$DIR/lay_plugins${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+export QT_PLUGIN_PATH="$DIR/plugins${QT_PLUGIN_PATH:+:$QT_PLUGIN_PATH}"
+if [[ -d "$DIR/pymod" ]]; then
+  export PYTHONPATH="$DIR/pymod${PYTHONPATH:+:$PYTHONPATH}"
+fi
+cd "$DIR"
+exec "$DIR/klayout" "$@"
+EOF
+  chmod +x "$run_sh"
+  if [[ ! -d "$bundle/pymod" ]]; then
+    echo "WARNING: $bundle/pymod missing — install a KLayout CI build with Python/pya (post-668aba96)." >&2
+  fi
+}
+
 # Older xschem CI bundles shipped room.tcl without room_lock.tcl / primitive_cache.
 # Pull the missing integration files from the Xschem-roomdb repo so launch works now.
 repair_xschem_integrations() {
@@ -1487,6 +1527,9 @@ install_one() {
       exe="$(find_exec "$prefix" klayout-run.sh klayout)" \
         || die "klayout binary not found under $prefix"
       patch_run_script_symlink_safe "$exe"
+      repair_klayout_run_env "$prefix"
+      # Prefer the (possibly repaired) launcher for PATH.
+      exe="$(find_exec "$prefix" klayout-run.sh klayout)"
       link_into_bin "$exe" klayout
       ;;
     emstudio)
