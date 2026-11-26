@@ -13,7 +13,7 @@
 #   ./install_room_stack_from_ci.sh --yes --prefix "$HOME/door"
 #   # or per-tool overrides:
 #   DOOR_PREFIX=/tmp/door/lib/room-stack/door BIN_DIR=/tmp/door/bin \
-#     ./install_room_stack_from_ci.sh --yes --tools door
+#     ./install_room_stack_from_ci.sh --yes --tools doo
 #
 # Options:
 #   --yes            no prompts (use env / defaults; tools = all unless --tools)
@@ -323,6 +323,9 @@ sys.stdout.buffer.write(b.strip())
 ' "$plain")" || { rm -f "$plain"; return 1; }
   rm -f "$plain"
   [[ -n "$out" ]] || return 1
+  # AES-CBC has no MAC: a wrong passphrase often still exits 0 with junk that
+  # happens to pass PKCS#7 padding. Only accept GitHub PAT-shaped plaintext.
+  validate_gh_token_shape "$out" || return 1
   printf '%s' "$out"
 }
 
@@ -780,7 +783,7 @@ parse_tools() {
       *) die "unknown tool in --tools: $t (want: door,qucs,xschem,klayout,emstudio,all)" ;;
     esac
   done
-  # Deduplicate while preserving order
+  # Deduplicate while preserving orde
   if [[ ${#TOOLS[@]} -gt 0 ]]; then
     local -a uniq=()
     local x seen
@@ -944,11 +947,21 @@ run_self_test() {
     encrypt_token_to_store "ghp_special_pass_token_xx" 'p$a:ss!word'
     _round="$(decrypt_token_from_store 'p$a:ss!word')"
     assert_eq "$_round" "ghp_special_pass_token_xx" "openssl pass env handles \$/! in passphrase"
-    if _round="$(decrypt_token_from_store "wrong-passphrase")"; then
-      echo "FAIL: decrypt with wrong passphrase succeeded unexpectedly" >&2
+    # Wrong passphrase: openssl CBC may still "decrypt"; shape check must reject.
+    _round=""
+    if _round="$(decrypt_token_from_store "wrong-passphrase-$$-not-the-key")"; then
+      echo "FAIL: decrypt with wrong passphrase succeeded unexpectedly (got len=${#_round})" >&2
       fail=1
     else
       echo "OK: wrong passphrase fails decrypt"
+    fi
+    # Non-PAT plaintext must not round-trip as a store value.
+    encrypt_token_to_store "not-a-github-token" "test-pass-phrase"
+    if _round="$(decrypt_token_from_store "test-pass-phrase")"; then
+      echo "FAIL: non-PAT plaintext accepted by decrypt_token_from_store" >&2
+      fail=1
+    else
+      echo "OK: non-PAT plaintext rejected after decrypt"
     fi
     rm -f "$TOKEN_STORE_FILE"
     TOKEN_STORE_FILE="$_prev_store"
@@ -981,7 +994,7 @@ fi
 
 if [[ "$DELETE_MODE" -eq 0 ]]; then
   ensure_gh
-  # --from-tar with a local file still uses gh for CI-busy checks unless dry-run exits earlier
+  # --from-tar with a local file still uses gh for CI-busy checks unless dry-run exits earlie
   ensure_gh_auth
 fi
 
@@ -1423,7 +1436,7 @@ attach_room_python() {
     cp -a "$room_src" "$pyroot/room"
     # Optional pure-python helpers from the same tree.
     if [[ -d "$(dirname "$room_src")" ]]; then
-      local pdir
+      local pdi
       pdir="$(dirname "$room_src")"
       for f in door_console.py setup.py pyproject.toml; do
         [[ -f "$pdir/$f" ]] || continue
@@ -1513,7 +1526,7 @@ repair_installed_tool() {
       patch_run_script_symlink_safe "$exe"
       attach_room_python "$prefix" || true
       exe="$(find_exec "$prefix" door-run.sh door)"
-      link_into_bin "$exe" door
+      link_into_bin "$exe" doo
       ;;
     qucs)
       exe="$(find_exec "$prefix" qucs-s-run.sh qucs-s qucs)" || return 0
@@ -1653,7 +1666,7 @@ install_one() {
       attach_room_python "$prefix"
       # Re-resolve after possible patch/attach.
       exe="$(find_exec "$prefix" door-run.sh door)"
-      link_into_bin "$exe" door
+      link_into_bin "$exe" doo
       ;;
     qucs)
       exe="$(find_exec "$prefix" qucs-s-run.sh qucs-s qucs)" \
