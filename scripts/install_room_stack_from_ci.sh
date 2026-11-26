@@ -23,6 +23,9 @@
 #   --flavor F       force artifact flavor: ubuntu24 | rocky8
 #   --tools LIST     door,qucs,xschem,klayout,emstudio (or 'all')
 #                    Without --tools: interactive prompt (default all); with --yes: all
+#   --update         only check/install updates for tools already under --prefix
+#                    (or only --tools if given). Skips tools whose CI artifact_id matches
+#                    BUNDLE_SOURCE.txt. Implies no interactive tool menu.
 #   --dry-run        print plan / CI status; do not download or install
 #   --self-test      run offline mapping assertions and exit
 #   --from-tar FILE  install one tool from a local .tar.gz (requires --tools with one entry)
@@ -42,6 +45,7 @@ FORCE_CI=0
 DRY_RUN=0
 SELF_TEST=0
 FORGET_TOKEN=0
+UPDATE_MODE=0
 FLAVOR_FORCE=""
 TOOLS_CSV="all"
 TOOLS_EXPLICIT=0
@@ -69,7 +73,7 @@ WORKFLOW_KLAYOUT="${WORKFLOW_KLAYOUT:-CI}"
 WORKFLOW_EMSTUDIO="${WORKFLOW_EMSTUDIO:-Build EMStudio}"
 
 usage() {
-  sed -n '2,42p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '2,46p' "$0" | sed 's/^# \{0,1\}//'
   exit 0
 }
 
@@ -81,6 +85,7 @@ while [[ $# -gt 0 ]]; do
     --dry-run) DRY_RUN=1 ;;
     --self-test) SELF_TEST=1 ;;
     --forget-token) FORGET_TOKEN=1 ;;
+    --update) UPDATE_MODE=1 ;;
     --flavor) FLAVOR_FORCE="${2:-}"; shift ;;
     --prefix) PREFIX_OPT="${2:-}"; shift ;;
     --tools) TOOLS_CSV="${2:-}"; TOOLS_EXPLICIT=1; shift ;;
@@ -404,6 +409,146 @@ tool_payload_dir() {
   echo "$INSTALL_PREFIX/lib/room-stack/$tool"
 }
 
+# Guess install root for --update when --prefix is omitted.
+guess_install_prefix() {
+  local cand
+  for cand in \
+      "${PREFIX_OPT:-}" \
+      "${INSTALL_PREFIX:-}" \
+      "${DEFAULT_ROOT:-}" \
+      "$HOME/door" \
+      "$HOME/.local" \
+      "/usr/local"; do
+    [[ -n "$cand" ]] || continue
+    if [[ -d "$cand/lib/room-stack" ]]; then
+      echo "${cand%/}"
+      return 0
+    fi
+  done
+  return 1
+}
+
+bin_name_for_tool() {
+  case "$1" in
+    door) echo door ;;
+    qucs) echo qucs-s ;;
+    xschem) echo xschem ;;
+    klayout) echo klayout ;;
+    emstudio) echo emstudio ;;
+    *) echo "$1" ;;
+  esac
+}
+
+tool_is_installed() {
+  local tool="$1"
+  local payload bin
+  payload="$(tool_payload_dir "$tool")"
+  if [[ -f "$payload/BUNDLE_SOURCE.txt" ]]; then
+    return 0
+  fi
+  # Payload dir with any content (partial install) counts.
+  if [[ -d "$payload" ]] && [[ -n "$(find "$payload" -mindepth 1 -maxdepth 1 2>/dev/null | head -n1)" ]]; then
+    return 0
+  fi
+  bin="${BIN_DIR:-$INSTALL_PREFIX/bin}/$(bin_name_for_tool "$tool")"
+  [[ -e "$bin" ]] && return 0
+  if [[ "$tool" == "emstudio" && -e "${BIN_DIR:-$INSTALL_PREFIX/bin}/EMStudio" ]]; then
+    return 0
+  fi
+  return 1
+}
+
+discover_installed_tools() {
+  local t
+  local -a found=()
+  for t in "${ALL_TOOLS[@]}"; do
+    if tool_is_installed "$t"; then
+      found+=("$t")
+    fi
+  done
+  if [[ ${#found[@]} -eq 0 ]]; then
+    return 1
+  fi
+  TOOLS=("${found[@]}")
+  return 0
+}
+
+read_bundle_field() {
+  local file="$1" key="$2"
+  [[ -f "$file" ]] || return 1
+  local line
+  line="$(grep -E "^${key}=" "$file" 2>/dev/null | head -n1 || true)"
+  [[ -n "$line" ]] || return 1
+  printf '%s' "${line#*=}"
+}
+
+# Resolve newest non-expired Actions artifact → ART_ID / CREATED / RUN_HINT via sourced file.
+resolve_latest_artifact_meta() {
+  local repo="$1" artifact="$2" meta_out="$3"
+  local art_json
+  art_json="$(mktemp)"
+  gh api "repos/$repo/actions/artifacts?name=$artifact&per_page=20" >"$art_json" \
+    || { rm -f "$art_json"; return 1; }
+  python3 - "$art_json" "$meta_out" <<'PY'
+import json, sys
+data = json.load(open(sys.argv[1], encoding="utf-8"))
+for a in data.get("artifacts", []):
+    if a.get("expired"):
+        continue
+    art_id = a.get("id")
+    if not art_id:
+        continue
+    run = (a.get("workflow_run") or {}).get("id") or ""
+    created = a.get("created_at") or ""
+    with open(sys.argv[2], "w", encoding="utf-8") as out:
+        out.write(f"ART_ID={art_id}\nCREATED={created}\nRUN_HINT={run}\n")
+    sys.exit(0)
+sys.exit(2)
+PY
+  local rc=$?
+  rm -f "$art_json"
+  return "$rc"
+}
+
+# 0 = needs install/update, 1 = already current. Prints reason on stdout.
+tool_update_status() {
+  local tool="$1"
+  local repo artifact payload meta installed_id latest_id created
+  repo="$(repo_for "$tool")"
+  artifact="$(artifact_for "$tool")"
+  payload="$(prefix_for "$tool")"
+  meta="$(mktemp)"
+  if ! resolve_latest_artifact_meta "$repo" "$artifact" "$meta"; then
+    rm -f "$meta"
+    echo "error: cannot query $repo artifact $artifact"
+    return 0
+  fi
+  # shellcheck disable=SC1090
+  source "$meta"
+  rm -f "$meta"
+  latest_id="${ART_ID:-}"
+  created="${CREATED:-}"
+  if [[ -z "$latest_id" ]]; then
+    echo "error: no non-expired artifact $artifact on $repo"
+    return 0
+  fi
+  if [[ ! -f "$payload/BUNDLE_SOURCE.txt" ]]; then
+    echo "missing (will install) latest=$latest_id created=$created"
+    return 0
+  fi
+  installed_id="$(read_bundle_field "$payload/BUNDLE_SOURCE.txt" artifact_id || true)"
+  if [[ -z "$installed_id" ]]; then
+    echo "no artifact_id in BUNDLE_SOURCE (will reinstall) latest=$latest_id"
+    return 0
+  fi
+  if [[ "$installed_id" == "$latest_id" ]]; then
+    echo "up-to-date artifact_id=$installed_id created=$created"
+    return 1
+  fi
+  echo "update installed=$installed_id -> latest=$latest_id created=$created"
+  return 0
+}
+
 detect_flavor() {
   if [[ -n "$FLAVOR_FORCE" ]]; then
     echo "$FLAVOR_FORCE"
@@ -608,6 +753,19 @@ run_self_test() {
 
   INSTALL_PREFIX="/tmp/room-prefix-test"
   assert_eq "$(tool_payload_dir door)" "/tmp/room-prefix-test/lib/room-stack/door" "payload dir layout"
+  assert_eq "$(bin_name_for_tool qucs)" "qucs-s" "qucs bin name"
+  assert_eq "$(bin_name_for_tool emstudio)" "emstudio" "emstudio bin name"
+
+  # discover_installed_tools: seed fake installs
+  rm -rf /tmp/room-prefix-test
+  mkdir -p /tmp/room-prefix-test/lib/room-stack/qucs /tmp/room-prefix-test/lib/room-stack/klayout
+  echo "artifact_id=111" >/tmp/room-prefix-test/lib/room-stack/qucs/BUNDLE_SOURCE.txt
+  echo "artifact_id=222" >/tmp/room-prefix-test/lib/room-stack/klayout/BUNDLE_SOURCE.txt
+  BIN_DIR=/tmp/room-prefix-test/bin
+  discover_installed_tools || fail=1
+  assert_eq "${TOOLS[*]}" "qucs klayout" "discover installed tools"
+  assert_eq "$(read_bundle_field /tmp/room-prefix-test/lib/room-stack/qucs/BUNDLE_SOURCE.txt artifact_id)" "111" "read bundle field"
+  rm -rf /tmp/room-prefix-test
 
   case "$(uname -m)" in
     x86_64|amd64|aarch64|arm64)
@@ -654,11 +812,6 @@ fi
 ensure_gh
 # --from-tar with a local file still uses gh for CI-busy checks unless dry-run exits earlier
 ensure_gh_auth
-parse_tools "$TOOLS_CSV"
-prompt_tools_selection
-FLAVOR="$(detect_flavor)"
-info "Detected install flavor: $FLAVOR"
-info "Tools: ${TOOLS[*]}"
 
 prompt_dir() {
   local label="$1" default="$2" out
@@ -682,21 +835,51 @@ want_tool() {
   return 1
 }
 
-# One shared prefix: <prefix>/bin + <prefix>/lib/room-stack/<tool>
-# Per-tool *_PREFIX env vars still override the payload dir (CI / advanced).
+# Resolve prefix early — --update needs it to discover installed tools.
 INSTALL_PREFIX="${INSTALL_PREFIX:-${PREFIX_OPT:-}}"
 if [[ -z "$INSTALL_PREFIX" ]]; then
-  INSTALL_PREFIX="$(prompt_dir "Install prefix" "$(default_install_root)")"
+  if [[ "$UPDATE_MODE" -eq 1 ]]; then
+    if INSTALL_PREFIX="$(guess_install_prefix)"; then
+      info "Detected existing install prefix: $INSTALL_PREFIX"
+    elif [[ "$YES" -eq 1 ]]; then
+      INSTALL_PREFIX="$(default_install_root)"
+    else
+      INSTALL_PREFIX="$(prompt_dir "Install prefix" "$(default_install_root)")"
+    fi
+  else
+    INSTALL_PREFIX="$(prompt_dir "Install prefix" "$(default_install_root)")"
+  fi
 fi
-# Normalize trailing slash
 INSTALL_PREFIX="${INSTALL_PREFIX%/}"
+BIN_DIR="${BIN_DIR:-$INSTALL_PREFIX/bin}"
+
+# Tool selection:
+#   --update (no --tools) → only tools already present under prefix
+#   --update --tools …   → only the listed tools (install if missing / update if newer)
+#   otherwise            → interactive / --tools / all as before
+if [[ "$UPDATE_MODE" -eq 1 ]]; then
+  if [[ "$TOOLS_EXPLICIT" -eq 1 ]]; then
+    parse_tools "$TOOLS_CSV"
+  else
+    if ! discover_installed_tools; then
+      die "nothing installed under $INSTALL_PREFIX/lib/room-stack — run without --update first, or pass --tools"
+    fi
+    info "Update mode: found installed tools: ${TOOLS[*]}"
+  fi
+else
+  parse_tools "$TOOLS_CSV"
+  prompt_tools_selection
+fi
+
+FLAVOR="$(detect_flavor)"
+info "Detected install flavor: $FLAVOR"
+info "Tools: ${TOOLS[*]}"
 
 DOOR_PREFIX="${DOOR_PREFIX:-}"
 QUCS_PREFIX="${QUCS_PREFIX:-}"
 XSCHEM_PREFIX="${XSCHEM_PREFIX:-}"
 KLAYOUT_PREFIX="${KLAYOUT_PREFIX:-}"
 EMSTUDIO_PREFIX="${EMSTUDIO_PREFIX:-}"
-BIN_DIR="${BIN_DIR:-}"
 
 if want_tool door; then
   DOOR_PREFIX="${DOOR_PREFIX:-$(tool_payload_dir door)}"
@@ -721,6 +904,30 @@ for t in "${TOOLS[@]}"; do
   info "$t -> $(prefix_for "$t")"
 done
 info "PATH bin -> $BIN_DIR"
+
+# --update: drop tools that already match the latest CI artifact_id.
+if [[ "$UPDATE_MODE" -eq 1 ]]; then
+  _status=""
+  _pending=()
+  info "Checking CI artifacts for updates…"
+  for t in "${TOOLS[@]}"; do
+    if _status="$(tool_update_status "$t")"; then
+      info "$t: $_status"
+      _pending+=("$t")
+    else
+      info "$t: $_status — skip"
+    fi
+  done
+  if [[ ${#_pending[@]} -eq 0 ]]; then
+    info "All selected tools are up to date."
+    if [[ "$DRY_RUN" -eq 1 ]]; then
+      info "Dry-run OK"
+    fi
+    exit 0
+  fi
+  TOOLS=("${_pending[@]}")
+  info "Will update/install: ${TOOLS[*]}"
+fi
 
 if [[ -n "$FROM_TAR" ]]; then
   [[ ${#TOOLS[@]} -eq 1 ]] || die "--from-tar requires exactly one tool in --tools"
@@ -811,7 +1018,7 @@ copy_stage_payload() {
 
 download_artifact() {
   local repo="$1" artifact="$2" out_dir="$3"
-  local stage art_json meta zip tar_path
+  local stage meta zip tar_path
   # Stage downloads under the shared prefix cache, not inside the tool dir,
   # so a failed fetch cannot leave a half-wiped tool.
   stage="${INSTALL_PREFIX}/lib/room-stack/.download-$$"
@@ -819,27 +1026,9 @@ download_artifact() {
   mkdir -p "$stage" "$out_dir"
 
   info "Fetching artifact '$artifact' from $repo"
-  art_json="$stage/artifacts.json"
-  gh api "repos/$repo/actions/artifacts?name=$artifact&per_page=20" >"$art_json" \
-    || die "cannot list artifacts on $repo (need PAT with actions:read)"
-
   meta="$stage/meta.env"
-  python3 - "$art_json" "$meta" <<'PY'
-import json, sys
-data = json.load(open(sys.argv[1], encoding="utf-8"))
-for a in data.get("artifacts", []):
-    if a.get("expired"):
-        continue
-    art_id = a.get("id")
-    if not art_id:
-        continue
-    run = (a.get("workflow_run") or {}).get("id") or ""
-    created = a.get("created_at") or ""
-    with open(sys.argv[2], "w", encoding="utf-8") as out:
-        out.write(f"ART_ID={art_id}\nCREATED={created}\nRUN_HINT={run}\n")
-    sys.exit(0)
-sys.exit(2)
-PY
+  resolve_latest_artifact_meta "$repo" "$artifact" "$meta" \
+    || die "cannot list artifacts on $repo (need PAT with actions:read)"
   # shellcheck disable=SC1090
   source "$meta"
   [[ -n "${ART_ID:-}" ]] || die "no non-expired artifact '$artifact' on $repo"
@@ -1175,7 +1364,7 @@ install_one() {
 }
 
 if [[ "$DRY_RUN" -eq 1 ]]; then
-  info "Dry-run plan:"
+  info "Dry-run plan${UPDATE_MODE:+ (update mode)}:"
   for t in "${TOOLS[@]}"; do
     echo "  $t: repo=$(repo_for "$t") artifact=$(artifact_for "$t") prefix=$(prefix_for "$t")"
   done
