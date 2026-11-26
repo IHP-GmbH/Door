@@ -11,11 +11,12 @@
 #   BIN_DIR=/usr/local/bin bash scripts/install_room_stack_from_ci.sh --yes
 #
 # Options:
-#   --yes            no prompts (use env PREFIX_* / defaults)
+#   --yes            no prompts (use env PREFIX_* / defaults; tools = all unless --tools)
 #   --wait           if CI is running, wait until it finishes (max WAIT_MAX_SEC)
 #   --force-ci       install even if a CI run is in progress
 #   --flavor F       force artifact flavor: ubuntu24 | rocky8
-#   --tools LIST     comma list: door,qucs,xschem,klayout (default: all)
+#   --tools LIST     comma list: door,qucs,xschem,klayout (or 'all')
+#                    Without --tools: interactive prompt (default all); with --yes: all
 #   --dry-run        print plan / CI status; do not download or install
 #   --self-test      run offline mapping assertions and exit
 #   --from-tar FILE  install one tool from a local .tar.gz (requires --tools with one entry)
@@ -30,10 +31,12 @@ FORCE_CI=0
 DRY_RUN=0
 SELF_TEST=0
 FLAVOR_FORCE=""
-TOOLS_CSV="door,qucs,xschem,klayout"
+TOOLS_CSV="all"
+TOOLS_EXPLICIT=0
 FROM_TAR=""
 WAIT_MAX_SEC="${WAIT_MAX_SEC:-3600}"
 POLL_SEC="${POLL_SEC:-30}"
+ALL_TOOLS=(door qucs xschem klayout)
 
 REPO_DOOR="${REPO_DOOR:-IHP-GmbH/Door}"
 REPO_QUCS="${REPO_QUCS:-adatsuk/Qucs-S-roomdb}"
@@ -46,7 +49,7 @@ WORKFLOW_XSCHEM="${WORKFLOW_XSCHEM:-CI}"
 WORKFLOW_KLAYOUT="${WORKFLOW_KLAYOUT:-CI}"
 
 usage() {
-  sed -n '2,28p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '2,30p' "$0" | sed 's/^# \{0,1\}//'
   exit 0
 }
 
@@ -58,7 +61,7 @@ while [[ $# -gt 0 ]]; do
     --dry-run) DRY_RUN=1 ;;
     --self-test) SELF_TEST=1 ;;
     --flavor) FLAVOR_FORCE="${2:-}"; shift ;;
-    --tools) TOOLS_CSV="${2:-}"; shift ;;
+    --tools) TOOLS_CSV="${2:-}"; TOOLS_EXPLICIT=1; shift ;;
     --from-tar) FROM_TAR="${2:-}"; shift ;;
     -h|--help) usage ;;
     *) echo "Unknown option: $1" >&2; exit 2 ;;
@@ -156,17 +159,73 @@ prefix_for() {
 parse_tools() {
   local raw="$1" t
   TOOLS=()
-  IFS=',' read -r -a _parts <<<"$raw"
+  # Accept commas and/or whitespace: "door qucs" / "door,qucs" / "all"
+  raw="$(echo "$raw" | tr '[:upper:]' '[:lower:]' | tr ',;' '  ')"
+  # shellcheck disable=SC2206
+  local _parts=($raw)
   for t in "${_parts[@]}"; do
-    t="$(echo "$t" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')"
+    t="${t//[[:space:]]/}"
     [[ -z "$t" ]] && continue
     case "$t" in
+      all|'*')
+        TOOLS=("${ALL_TOOLS[@]}")
+        break
+        ;;
       door|qucs|xschem|klayout) TOOLS+=("$t") ;;
       qucs-s) TOOLS+=("qucs") ;;
-      *) die "unknown tool in --tools: $t" ;;
+      *) die "unknown tool in --tools: $t (want: door,qucs,xschem,klayout,all)" ;;
     esac
   done
-  [[ ${#TOOLS[@]} -gt 0 ]] || die "--tools list is empty"
+  # Deduplicate while preserving order
+  if [[ ${#TOOLS[@]} -gt 0 ]]; then
+    local -a uniq=()
+    local x seen
+    for t in "${TOOLS[@]}"; do
+      seen=0
+      for x in "${uniq[@]+"${uniq[@]}"}"; do
+        [[ "$x" == "$t" ]] && { seen=1; break; }
+      done
+      [[ "$seen" -eq 0 ]] && uniq+=("$t")
+    done
+    TOOLS=("${uniq[@]}")
+  fi
+  [[ ${#TOOLS[@]} -gt 0 ]] || die "tools list is empty (use door,qucs,xschem,klayout or all)"
+}
+
+# Interactive: default = all; user may edit the list or answer y/n per tool.
+prompt_tools_selection() {
+  if [[ "$YES" -eq 1 || "$TOOLS_EXPLICIT" -eq 1 ]]; then
+    return
+  fi
+  local default="door,qucs,xschem,klayout" ans mode
+  echo
+  info "Select tools to install (default: all)"
+  echo "  Available: door, qucs, xschem, klayout"
+  echo "  Enter a comma/space list, 'all', or 'ask' for per-tool y/n prompts."
+  read -r -p "Tools [$default]: " ans || true
+  ans="${ans#"${ans%%[![:space:]]*}"}"
+  ans="${ans%"${ans##*[![:space:]]}"}"
+  if [[ -z "$ans" ]]; then
+    parse_tools "$default"
+    return
+  fi
+  mode="$(echo "$ans" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')"
+  if [[ "$mode" == "ask" || "$mode" == "menu" ]]; then
+    local selected=() t yn
+    for t in "${ALL_TOOLS[@]}"; do
+      read -r -p "  Install ${t}? [Y/n]: " yn || true
+      yn="$(echo "${yn:-Y}" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')"
+      case "$yn" in
+        ""|y|yes) selected+=("$t") ;;
+        n|no) ;;
+        *) die "expected y/n for $t, got: $yn" ;;
+      esac
+    done
+    [[ ${#selected[@]} -gt 0 ]] || die "no tools selected"
+    TOOLS=("${selected[@]}")
+    return
+  fi
+  parse_tools "$ans"
 }
 
 run_self_test() {
@@ -201,6 +260,14 @@ run_self_test() {
   assert_eq "$(repo_for door)" "$REPO_DOOR" "door repo"
   assert_eq "$(repo_for klayout)" "$REPO_KLAYOUT" "klayout repo"
 
+  parse_tools "all"
+  assert_eq "${#TOOLS[@]}" "4" "parse all -> 4 tools"
+  assert_eq "${TOOLS[*]}" "door qucs xschem klayout" "parse all order"
+  parse_tools "door, qucs-s"
+  assert_eq "${TOOLS[*]}" "door qucs" "parse subset + qucs-s alias"
+  parse_tools "klayout door door"
+  assert_eq "${TOOLS[*]}" "klayout door" "dedupe preserves first order"
+
   bash -n "$0" || { echo "FAIL: bash -n" >&2; fail=1; }
   [[ "$fail" -eq 0 ]] || die "self-test failed"
   info "Self-test passed"
@@ -215,6 +282,7 @@ fi
 
 need gh
 parse_tools "$TOOLS_CSV"
+prompt_tools_selection
 FLAVOR="$(detect_flavor)"
 info "Detected install flavor: $FLAVOR"
 info "Tools: ${TOOLS[*]}"
