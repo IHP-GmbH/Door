@@ -604,18 +604,44 @@ tool_update_status() {
   return 0
 }
 
+# glibc major.minor from the running linker (e.g. 2.28 on Rocky 8, 2.39 on Ubuntu 24).
+host_glibc_version() {
+  local v
+  v="$(getconf GNU_LIBC_VERSION 2>/dev/null | awk '{print $2}')"
+  if [[ -z "$v" ]]; then
+    v="$(ldd --version 2>&1 | head -n1 | grep -oE '[0-9]+\.[0-9]+' | head -n1 || true)"
+  fi
+  printf '%s' "$v"
+}
+
+# Compare dotted versions: 0 if $1 < $2, 1 otherwise.
+version_lt() {
+  local a="$1" b="$2"
+  [[ "$(printf '%s\n%s\n' "$a" "$b" | sort -V | head -n1)" == "$a" && "$a" != "$b" ]]
+}
+
 detect_flavor() {
   if [[ -n "$FLAVOR_FORCE" ]]; then
     echo "$FLAVOR_FORCE"
     return
   fi
-  local id="" ver=""
+  local id="" id_like="" ver="" glibc=""
   if [[ -r /etc/os-release ]]; then
     # shellcheck disable=SC1091
     . /etc/os-release
     id="${ID:-}"
+    id_like="${ID_LIKE:-}"
     ver="${VERSION_ID:-}"
   fi
+  glibc="$(host_glibc_version)"
+
+  # Prefer glibc: ubuntu24 bundles need ≥ 2.34; rocky8/ubuntu22 need ≥ 2.28.
+  if [[ -n "$glibc" ]] && version_lt "$glibc" "2.34"; then
+    echo "Host glibc $glibc < 2.34 — using rocky8 / ubuntu22 bundles." >&2
+    echo rocky8
+    return
+  fi
+
   case "$id" in
     ubuntu|linuxmint|pop)
       case "$ver" in
@@ -630,12 +656,23 @@ detect_flavor() {
           ;;
       esac
       ;;
-    rocky|almalinux|rhel|centos|ol)
+    rocky|almalinux|rhel|centos|ol|scientific)
       echo rocky8
       ;;
     *)
-      echo "Unknown distro '${id:-?}' ${ver} — defaulting to ubuntu24." >&2
-      echo ubuntu24
+      # RHEL-family often sets ID_LIKE="rhel fedora" / "centos rhel fedora".
+      if [[ " $id_like " == *" rhel "* || " $id_like " == *" centos "* || " $id_like " == *" fedora "* ]]; then
+        echo "Distro '${id}' (ID_LIKE=$id_like) — using rocky8 bundles." >&2
+        echo rocky8
+        return
+      fi
+      if [[ -n "$glibc" ]] && ! version_lt "$glibc" "2.34"; then
+        echo "Unknown distro '${id:-?}' ${ver} (glibc $glibc) — defaulting to ubuntu24." >&2
+        echo ubuntu24
+      else
+        echo "Unknown distro '${id:-?}' ${ver} — defaulting to rocky8 (safer glibc)." >&2
+        echo rocky8
+      fi
       ;;
   esac
 }
@@ -775,6 +812,19 @@ run_self_test() {
       echo "OK: $msg"
     fi
   }
+
+  if version_lt "2.28" "2.34"; then
+    echo "OK: version_lt 2.28 < 2.34"
+  else
+    echo "FAIL: version_lt 2.28 < 2.34" >&2
+    fail=1
+  fi
+  if version_lt "2.34" "2.28"; then
+    echo "FAIL: version_lt 2.34 < 2.28 should be false" >&2
+    fail=1
+  else
+    echo "OK: version_lt 2.34 !< 2.28"
+  fi
 
   FLAVOR_FORCE=ubuntu24
   FLAVOR="$(detect_flavor)"
