@@ -93,6 +93,57 @@ if [[ -d "$ROOT/capnp-install/lib" ]]; then
     cp -a "$ROOT/capnp-install/lib/"lib*.so* "$DIST/lib/" 2>/dev/null || true
 fi
 
+# ROOM import/export converters (built next to door / under Room build).
+ROOM_CONVERTERS=(
+    gds_to_room xschem_to_room qucs_to_room oas_to_room json_to_room
+    room_to_gds room_to_xschem room_to_qucs room_to_json
+)
+copy_converter_deps() {
+    local bin="$1"
+    command -v ldd >/dev/null 2>&1 || return 0
+    local line lib
+    while IFS= read -r line; do
+        lib="$(awk '/=>/ { print $3 }' <<<"$line")"
+        [[ -n "$lib" && -f "$lib" ]] || continue
+        case "$lib" in
+            /lib/*|/lib64/*|/usr/lib/*|/usr/lib64/*) continue ;;
+        esac
+        cp -an "$lib" "$DIST/lib/" 2>/dev/null || cp -a "$lib" "$DIST/lib/" 2>/dev/null || true
+    done < <(ldd "$bin" 2>/dev/null || true)
+}
+copied_converters=0
+for name in "${ROOM_CONVERTERS[@]}"; do
+    src=""
+    for candidate in \
+        "$BUILD_DIR/$name" \
+        "$BUILD_DIR/release/$name" \
+        "$BUILD_DIR/bin/$name" \
+        "$ROOT/.deps/Room-build/$name" \
+        "$ROOT/.deps/commondb-build/$name"; do
+        if [[ -f "$candidate" ]]; then
+            src="$candidate"
+            break
+        fi
+    done
+    if [[ -z "$src" ]]; then
+        # CMake FetchContent / nested Room build dirs.
+        src="$(find "$BUILD_DIR" "$ROOT/.deps" -type f -name "$name" 2>/dev/null | head -n1 || true)"
+    fi
+    if [[ -z "$src" || ! -f "$src" ]]; then
+        echo "WARNING: converter $name not found under $BUILD_DIR (Import may need LIBMAN_CONVERTER_DIR)" >&2
+        continue
+    fi
+    cp -a "$src" "$DIST/bin/$name"
+    chmod +x "$DIST/bin/$name"
+    if command -v patchelf >/dev/null 2>&1; then
+        patchelf --set-rpath '$ORIGIN/../lib' "$DIST/bin/$name" || true
+    fi
+    copy_converter_deps "$DIST/bin/$name"
+    copied_converters=$((copied_converters + 1))
+    echo "Bundled converter: $name"
+done
+echo "Converters bundled: $copied_converters / ${#ROOM_CONVERTERS[@]}"
+
 if command -v patchelf >/dev/null 2>&1; then
     patchelf --set-rpath '$ORIGIN/../lib' "$DIST/bin/door" || true
 fi
@@ -116,6 +167,10 @@ done
 DIR="$(cd -P "$(dirname "$_src")" && pwd)"
 export LD_LIBRARY_PATH="$DIR/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 export QT_PLUGIN_PATH="$DIR/plugins${QT_PLUGIN_PATH:+:$QT_PLUGIN_PATH}"
+# Converters live next to door in bin/; also honor explicit override.
+if [[ -z "${LIBMAN_CONVERTER_DIR:-}" && -x "$DIR/bin/gds_to_room" ]]; then
+  export LIBMAN_CONVERTER_DIR="$DIR/bin"
+fi
 # Prefer bundled Room python next to the binary (…/dist-bundle/python/room).
 if [[ -f "$DIR/python/room/__init__.py" ]]; then
   export DOOR_ROOM_PYTHON="${DOOR_ROOM_PYTHON:-$DIR/python}"
