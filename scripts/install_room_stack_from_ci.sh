@@ -1,21 +1,27 @@
 #!/usr/bin/env bash
-# Install Door / Qucs-S / Xschem / KLayout(+mroom) from the latest successful
-# GitHub Actions artifacts for this Linux distro.
+# Install Door / Qucs-S / Xschem / KLayout(+mroom) / EMStudio from the latest
+# successful GitHub Actions artifacts for this Linux distro.
+#
+# Layout (native-style, one prefix — tools do NOT wipe each other):
+#   <prefix>/bin/<tool>              -> symlinks on PATH
+#   <prefix>/lib/room-stack/<tool>/  -> unpacked CI bundles
 #
 # Usage (interactive):
 #   bash scripts/install_room_stack_from_ci.sh
 #
 # Non-interactive:
-#   DOOR_PREFIX=/opt/door KLAYOUT_PREFIX=/opt/klayout \
-#   QUCS_PREFIX=/opt/qucs-s XSCHEM_PREFIX=/opt/xschem \
-#   BIN_DIR=/usr/local/bin bash scripts/install_room_stack_from_ci.sh --yes
+#   ./install_room_stack_from_ci.sh --yes --prefix "$HOME/door"
+#   # or per-tool overrides:
+#   DOOR_PREFIX=/tmp/door/lib/room-stack/door BIN_DIR=/tmp/door/bin \
+#     ./install_room_stack_from_ci.sh --yes --tools door
 #
 # Options:
-#   --yes            no prompts (use env PREFIX_* / defaults; tools = all unless --tools)
+#   --yes            no prompts (use env / defaults; tools = all unless --tools)
+#   --prefix DIR     shared install root (bin + lib/room-stack); default ~/.local or /usr/local
 #   --wait           if CI is running, wait until it finishes (max WAIT_MAX_SEC)
 #   --force-ci       install even if a CI run is in progress
 #   --flavor F       force artifact flavor: ubuntu24 | rocky8
-#   --tools LIST     comma list: door,qucs,xschem,klayout (or 'all')
+#   --tools LIST     door,qucs,xschem,klayout,emstudio (or 'all')
 #                    Without --tools: interactive prompt (default all); with --yes: all
 #   --dry-run        print plan / CI status; do not download or install
 #   --self-test      run offline mapping assertions and exit
@@ -40,9 +46,10 @@ FLAVOR_FORCE=""
 TOOLS_CSV="all"
 TOOLS_EXPLICIT=0
 FROM_TAR=""
+PREFIX_OPT=""
 WAIT_MAX_SEC="${WAIT_MAX_SEC:-3600}"
 POLL_SEC="${POLL_SEC:-30}"
-ALL_TOOLS=(door qucs xschem klayout)
+ALL_TOOLS=(door qucs xschem klayout emstudio)
 # Fallback gh release if api.github.com is rate-limited / unreachable.
 GH_VERSION_FALLBACK="${GH_VERSION_FALLBACK:-2.82.1}"
 TOKEN_STORE_DIR="${ROOM_STACK_CONFIG_DIR:-$HOME/.config/room-stack}"
@@ -52,14 +59,16 @@ REPO_DOOR="${REPO_DOOR:-IHP-GmbH/Door}"
 REPO_QUCS="${REPO_QUCS:-adatsuk/Qucs-S-roomdb}"
 REPO_XSCHEM="${REPO_XSCHEM:-adatsuk/XSchem-roomdb}"
 REPO_KLAYOUT="${REPO_KLAYOUT:-adatsuk/KLayout-roomdb}"
+REPO_EMSTUDIO="${REPO_EMSTUDIO:-IHP-GmbH/EMStudio}"
 
 WORKFLOW_DOOR="${WORKFLOW_DOOR:-Build DOOR}"
 WORKFLOW_QUCS="${WORKFLOW_QUCS:-CI}"
 WORKFLOW_XSCHEM="${WORKFLOW_XSCHEM:-CI}"
 WORKFLOW_KLAYOUT="${WORKFLOW_KLAYOUT:-CI}"
+WORKFLOW_EMSTUDIO="${WORKFLOW_EMSTUDIO:-Build EMStudio}"
 
 usage() {
-  sed -n '2,36p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '2,42p' "$0" | sed 's/^# \{0,1\}//'
   exit 0
 }
 
@@ -72,6 +81,7 @@ while [[ $# -gt 0 ]]; do
     --self-test) SELF_TEST=1 ;;
     --forget-token) FORGET_TOKEN=1 ;;
     --flavor) FLAVOR_FORCE="${2:-}"; shift ;;
+    --prefix) PREFIX_OPT="${2:-}"; shift ;;
     --tools) TOOLS_CSV="${2:-}"; TOOLS_EXPLICIT=1; shift ;;
     --from-tar) FROM_TAR="${2:-}"; shift ;;
     -h|--help) usage ;;
@@ -304,7 +314,7 @@ ensure_gh_auth() {
   echo "  Open this link to generate a classic token (public_repo pre-checked):"
   echo "  https://github.com/settings/tokens/new?scopes=public_repo&description=room-stack-ci-install"
   echo "  Click Generate token, copy the ghp_… value, paste below."
-  echo "  (Fine-grained alternative: Actions=Read on Door/Qucs/Xschem/KLayout repos.)"
+  echo "  (Fine-grained: Actions=Read on Door/Qucs/Xschem/KLayout/EMStudio repos.)"
   token="$(read_secret "Paste PAT: ")"
   [[ -n "$token" ]] || die "empty PAT"
   export GH_TOKEN="$token"
@@ -317,31 +327,23 @@ ensure_gh_auth() {
   fi
 }
 
-# Prefer system prefixes when writable; otherwise fall back to $HOME (no sudo).
+# Prefer /usr/local when writable; otherwise $HOME/.local (no sudo).
 default_install_root() {
   if [[ -n "${DEFAULT_ROOT:-}" ]]; then
     echo "$DEFAULT_ROOT"
     return
   fi
-  if { [[ -d /usr/local/opt ]] && [[ -w /usr/local/opt ]]; } || \
-     { [[ ! -e /usr/local/opt ]] && [[ -d /usr/local ]] && [[ -w /usr/local ]]; }; then
-    echo "/usr/local/opt"
+  if [[ -d /usr/local ]] && [[ -w /usr/local ]]; then
+    echo "/usr/local"
   else
-    echo "$HOME/.local/opt"
+    echo "$HOME/.local"
   fi
 }
 
-default_bin_dir() {
-  if [[ -n "${DEFAULT_BIN:-}" ]]; then
-    echo "$DEFAULT_BIN"
-    return
-  fi
-  if { [[ -d /usr/local/bin ]] && [[ -w /usr/local/bin ]]; } || \
-     { [[ ! -e /usr/local/bin ]] && [[ -d /usr/local ]] && [[ -w /usr/local ]]; }; then
-    echo "/usr/local/bin"
-  else
-    echo "$HOME/.local/bin"
-  fi
+# Per-tool payload lives under <prefix>/lib/room-stack/<tool> unless TOOL_PREFIX is set.
+tool_payload_dir() {
+  local tool="$1"
+  echo "$INSTALL_PREFIX/lib/room-stack/$tool"
 }
 
 detect_flavor() {
@@ -384,14 +386,17 @@ detect_flavor() {
 artifact_for() {
   local tool="$1"
   case "$tool/$FLAVOR" in
-    door/ubuntu24)    echo door-linux-ubuntu24 ;;
-    door/rocky8)      echo door-rhel8 ;;
-    qucs/ubuntu24)    echo qucs-s-ubuntu24 ;;
-    qucs/rocky8)      echo qucs-s-rocky8 ;;
-    xschem/ubuntu24)  echo xschem-ubuntu24 ;;
-    xschem/rocky8)    echo xschem-rocky8 ;;
-    klayout/ubuntu24) echo klayout-linux-ubuntu24 ;;
-    klayout/rocky8)   echo klayout-rocky8 ;;
+    door/ubuntu24)       echo door-linux-ubuntu24 ;;
+    door/rocky8)         echo door-rhel8 ;;
+    qucs/ubuntu24)       echo qucs-s-ubuntu24 ;;
+    qucs/rocky8)         echo qucs-s-rocky8 ;;
+    xschem/ubuntu24)     echo xschem-ubuntu24 ;;
+    xschem/rocky8)       echo xschem-rocky8 ;;
+    klayout/ubuntu24)    echo klayout-linux-ubuntu24 ;;
+    klayout/rocky8)      echo klayout-rocky8 ;;
+    # EMStudio ships portable ubuntu22/ubuntu24 bundles (no rocky8 yet).
+    emstudio/ubuntu24)   echo emstudio-linux-ubuntu24 ;;
+    emstudio/rocky8)     echo emstudio-linux-ubuntu22 ;;
     *) die "no artifact mapping for $tool / $FLAVOR" ;;
   esac
 }
@@ -402,6 +407,7 @@ repo_for() {
     qucs) echo "$REPO_QUCS" ;;
     xschem) echo "$REPO_XSCHEM" ;;
     klayout) echo "$REPO_KLAYOUT" ;;
+    emstudio) echo "$REPO_EMSTUDIO" ;;
     *) die "unknown tool: $1" ;;
   esac
 }
@@ -412,6 +418,7 @@ workflow_for() {
     qucs) echo "$WORKFLOW_QUCS" ;;
     xschem) echo "$WORKFLOW_XSCHEM" ;;
     klayout) echo "$WORKFLOW_KLAYOUT" ;;
+    emstudio) echo "$WORKFLOW_EMSTUDIO" ;;
   esac
 }
 
@@ -421,6 +428,7 @@ prefix_for() {
     qucs) echo "$QUCS_PREFIX" ;;
     xschem) echo "$XSCHEM_PREFIX" ;;
     klayout) echo "$KLAYOUT_PREFIX" ;;
+    emstudio) echo "$EMSTUDIO_PREFIX" ;;
   esac
 }
 
@@ -439,9 +447,10 @@ parse_tools() {
         TOOLS=("${ALL_TOOLS[@]}")
         break
         ;;
-      door|qucs|xschem|klayout) TOOLS+=("$t") ;;
+      door|qucs|xschem|klayout|emstudio) TOOLS+=("$t") ;;
       qucs-s) TOOLS+=("qucs") ;;
-      *) die "unknown tool in --tools: $t (want: door,qucs,xschem,klayout,all)" ;;
+      em) TOOLS+=("emstudio") ;;
+      *) die "unknown tool in --tools: $t (want: door,qucs,xschem,klayout,emstudio,all)" ;;
     esac
   done
   # Deduplicate while preserving order
@@ -457,7 +466,7 @@ parse_tools() {
     done
     TOOLS=("${uniq[@]}")
   fi
-  [[ ${#TOOLS[@]} -gt 0 ]] || die "tools list is empty (use door,qucs,xschem,klayout or all)"
+  [[ ${#TOOLS[@]} -gt 0 ]] || die "tools list is empty (use door,qucs,xschem,klayout,emstudio or all)"
 }
 
 # Interactive: default = all; user may edit the list or answer y/n per tool.
@@ -465,10 +474,10 @@ prompt_tools_selection() {
   if [[ "$YES" -eq 1 || "$TOOLS_EXPLICIT" -eq 1 ]]; then
     return
   fi
-  local default="door,qucs,xschem,klayout" ans mode
+  local default="door,qucs,xschem,klayout,emstudio" ans mode
   echo
   info "Select tools to install (default: all)"
-  echo "  Available: door, qucs, xschem, klayout"
+  echo "  Available: door, qucs, xschem, klayout, emstudio"
   echo "  Enter a comma/space list, 'all', or 'ask' for per-tool y/n prompts."
   read -r -p "Tools [$default]: " ans || true
   ans="${ans#"${ans%%[![:space:]]*}"}"
@@ -516,6 +525,7 @@ run_self_test() {
   assert_eq "$(artifact_for qucs)" qucs-s-ubuntu24 "qucs ubuntu24 artifact"
   assert_eq "$(artifact_for xschem)" xschem-ubuntu24 "xschem ubuntu24 artifact"
   assert_eq "$(artifact_for klayout)" klayout-linux-ubuntu24 "klayout ubuntu24 artifact"
+  assert_eq "$(artifact_for emstudio)" emstudio-linux-ubuntu24 "emstudio ubuntu24 artifact"
 
   FLAVOR_FORCE=rocky8
   FLAVOR="$(detect_flavor)"
@@ -524,17 +534,22 @@ run_self_test() {
   assert_eq "$(artifact_for qucs)" qucs-s-rocky8 "qucs rocky8 artifact"
   assert_eq "$(artifact_for xschem)" xschem-rocky8 "xschem rocky8 artifact"
   assert_eq "$(artifact_for klayout)" klayout-rocky8 "klayout rocky8 artifact"
+  assert_eq "$(artifact_for emstudio)" emstudio-linux-ubuntu22 "emstudio rocky8->ubuntu22 artifact"
 
   assert_eq "$(repo_for door)" "$REPO_DOOR" "door repo"
   assert_eq "$(repo_for klayout)" "$REPO_KLAYOUT" "klayout repo"
+  assert_eq "$(repo_for emstudio)" "$REPO_EMSTUDIO" "emstudio repo"
 
   parse_tools "all"
-  assert_eq "${#TOOLS[@]}" "4" "parse all -> 4 tools"
-  assert_eq "${TOOLS[*]}" "door qucs xschem klayout" "parse all order"
-  parse_tools "door, qucs-s"
-  assert_eq "${TOOLS[*]}" "door qucs" "parse subset + qucs-s alias"
+  assert_eq "${#TOOLS[@]}" "5" "parse all -> 5 tools"
+  assert_eq "${TOOLS[*]}" "door qucs xschem klayout emstudio" "parse all order"
+  parse_tools "door, qucs-s, em"
+  assert_eq "${TOOLS[*]}" "door qucs emstudio" "parse subset + aliases"
   parse_tools "klayout door door"
   assert_eq "${TOOLS[*]}" "klayout door" "dedupe preserves first order"
+
+  INSTALL_PREFIX="/tmp/room-prefix-test"
+  assert_eq "$(tool_payload_dir door)" "/tmp/room-prefix-test/lib/room-stack/door" "payload dir layout"
 
   case "$(uname -m)" in
     x86_64|amd64|aarch64|arm64)
@@ -598,10 +613,6 @@ prompt_dir() {
   fi
 }
 
-DEFAULT_ROOT="$(default_install_root)"
-DEFAULT_BIN="$(default_bin_dir)"
-info "Default prefixes under: $DEFAULT_ROOT (bin: $DEFAULT_BIN)"
-
 want_tool() {
   local t="$1" x
   for x in "${TOOLS[@]}"; do
@@ -610,26 +621,41 @@ want_tool() {
   return 1
 }
 
+# One shared prefix: <prefix>/bin + <prefix>/lib/room-stack/<tool>
+# Per-tool *_PREFIX env vars still override the payload dir (CI / advanced).
+INSTALL_PREFIX="${INSTALL_PREFIX:-${PREFIX_OPT:-}}"
+if [[ -z "$INSTALL_PREFIX" ]]; then
+  INSTALL_PREFIX="$(prompt_dir "Install prefix" "$(default_install_root)")"
+fi
+# Normalize trailing slash
+INSTALL_PREFIX="${INSTALL_PREFIX%/}"
+
 DOOR_PREFIX="${DOOR_PREFIX:-}"
 QUCS_PREFIX="${QUCS_PREFIX:-}"
 XSCHEM_PREFIX="${XSCHEM_PREFIX:-}"
 KLAYOUT_PREFIX="${KLAYOUT_PREFIX:-}"
+EMSTUDIO_PREFIX="${EMSTUDIO_PREFIX:-}"
 BIN_DIR="${BIN_DIR:-}"
 
 if want_tool door; then
-  DOOR_PREFIX="${DOOR_PREFIX:-$(prompt_dir "Door install directory" "$DEFAULT_ROOT/door")}"
+  DOOR_PREFIX="${DOOR_PREFIX:-$(tool_payload_dir door)}"
 fi
 if want_tool qucs; then
-  QUCS_PREFIX="${QUCS_PREFIX:-$(prompt_dir "Qucs-S install directory" "$DEFAULT_ROOT/qucs-s")}"
+  QUCS_PREFIX="${QUCS_PREFIX:-$(tool_payload_dir qucs)}"
 fi
 if want_tool xschem; then
-  XSCHEM_PREFIX="${XSCHEM_PREFIX:-$(prompt_dir "Xschem install directory" "$DEFAULT_ROOT/xschem")}"
+  XSCHEM_PREFIX="${XSCHEM_PREFIX:-$(tool_payload_dir xschem)}"
 fi
 if want_tool klayout; then
-  KLAYOUT_PREFIX="${KLAYOUT_PREFIX:-$(prompt_dir "KLayout install directory" "$DEFAULT_ROOT/klayout")}"
+  KLAYOUT_PREFIX="${KLAYOUT_PREFIX:-$(tool_payload_dir klayout)}"
 fi
-BIN_DIR="${BIN_DIR:-$(prompt_dir "Symlink directory (PATH)" "$DEFAULT_BIN")}"
+if want_tool emstudio; then
+  EMSTUDIO_PREFIX="${EMSTUDIO_PREFIX:-$(tool_payload_dir emstudio)}"
+fi
+BIN_DIR="${BIN_DIR:-$INSTALL_PREFIX/bin}"
 
+info "Install prefix: $INSTALL_PREFIX"
+info "Layout: $BIN_DIR/<tool>  and  $INSTALL_PREFIX/lib/room-stack/<tool>/"
 for t in "${TOOLS[@]}"; do
   info "$t -> $(prefix_for "$t")"
 done
@@ -693,13 +719,43 @@ wait_for_ci() {
   done
 }
 
+# Wipe only this tool's payload dir (never the shared prefix / sibling tools).
+clear_tool_dir() {
+  local out_dir="$1"
+  mkdir -p "$out_dir"
+  find "$out_dir" -mindepth 1 -maxdepth 1 -exec rm -rf {} +
+}
+
+write_bundle_source() {
+  local out_dir="$1"
+  shift
+  {
+    printf '%s\n' "$@"
+  } >"$out_dir/BUNDLE_SOURCE.txt"
+}
+
+# Copy unzipped artifact payload into out_dir (for artifacts that are a directory, not tar.gz).
+copy_stage_payload() {
+  local stage="$1" out_dir="$2"
+  local item base
+  for item in "$stage"/*; do
+    [[ -e "$item" ]] || continue
+    base="$(basename "$item")"
+    case "$base" in
+      .download|artifacts.json|bundle.zip|meta.env) continue ;;
+    esac
+    cp -a "$item" "$out_dir/"
+  done
+}
+
 download_artifact() {
   local repo="$1" artifact="$2" out_dir="$3"
   local stage art_json meta zip tar_path
-  mkdir -p "$out_dir"
-  stage="$out_dir/.download"
+  # Stage downloads under the shared prefix cache, not inside the tool dir,
+  # so a failed fetch cannot leave a half-wiped tool.
+  stage="${INSTALL_PREFIX}/lib/room-stack/.download-$$"
   rm -rf "$stage"
-  mkdir -p "$stage"
+  mkdir -p "$stage" "$out_dir"
 
   info "Fetching artifact '$artifact' from $repo"
   art_json="$stage/artifacts.json"
@@ -739,30 +795,40 @@ print("zip entries:", ", ".join(z.namelist()[:12]))
 PY
 
   tar_path="$(find "$stage" -type f \( -name '*.tar.gz' -o -name '*.tgz' \) | head -n1 || true)"
-  [[ -n "$tar_path" ]] || die "no .tar.gz inside artifact zip for $artifact"
 
-  find "$out_dir" -mindepth 1 -maxdepth 1 ! -name '.download' -exec rm -rf {} +
-  tar -xzf "$tar_path" -C "$out_dir"
+  clear_tool_dir "$out_dir"
+  if [[ -n "$tar_path" ]]; then
+    tar -xzf "$tar_path" -C "$out_dir"
+  else
+    # EMStudio (and similar) upload a directory tree, not a nested tar.gz.
+    copy_stage_payload "$stage" "$out_dir"
+    # If the zip had a single top-level folder, flatten one level when it looks like a bundle.
+    if [[ "$(find "$out_dir" -mindepth 1 -maxdepth 1 | wc -l)" -eq 1 ]]; then
+      local only
+      only="$(find "$out_dir" -mindepth 1 -maxdepth 1 -type d | head -n1 || true)"
+      if [[ -n "$only" ]] && [[ ! -e "$only/BUNDLE_SOURCE.txt" ]]; then
+        # Keep as-is; find_exec searches recursively.
+        :
+      fi
+    fi
+  fi
   rm -rf "$stage"
 
-  {
-    echo "repo=$repo"
-    echo "artifact=$artifact"
-    echo "artifact_id=$ART_ID"
-    echo "created_at=$CREATED"
-    echo "workflow_run=$RUN_HINT"
-  } >"$out_dir/BUNDLE_SOURCE.txt"
+  write_bundle_source "$out_dir" \
+    "repo=$repo" \
+    "artifact=$artifact" \
+    "artifact_id=$ART_ID" \
+    "created_at=$CREATED" \
+    "workflow_run=$RUN_HINT"
 }
 
 install_from_tar() {
   local out_dir="$1" tar_path="$2"
-  mkdir -p "$out_dir"
-  find "$out_dir" -mindepth 1 -maxdepth 1 -exec rm -rf {} +
+  clear_tool_dir "$out_dir"
   tar -xzf "$tar_path" -C "$out_dir"
-  {
-    echo "source=local-tar"
-    echo "tar=$tar_path"
-  } >"$out_dir/BUNDLE_SOURCE.txt"
+  write_bundle_source "$out_dir" \
+    "source=local-tar" \
+    "tar=$tar_path"
 }
 
 find_exec() {
@@ -790,6 +856,7 @@ link_into_bin() {
 install_one() {
   local tool="$1" prefix="$2"
   local repo artifact exe
+  info "Installing $tool into $prefix (siblings under lib/room-stack/ are kept)"
   if [[ -n "$FROM_TAR" ]]; then
     install_from_tar "$prefix" "$FROM_TAR"
   else
@@ -818,6 +885,15 @@ install_one() {
       exe="$(find_exec "$prefix" klayout-run.sh klayout)" \
         || die "klayout binary not found under $prefix"
       link_into_bin "$exe" klayout
+      ;;
+    emstudio)
+      exe="$(find_exec "$prefix" EMStudio emstudio)" \
+        || die "EMStudio launcher/binary not found under $prefix"
+      link_into_bin "$exe" emstudio
+      # Also expose canonical capitalized name when different.
+      if [[ "$(basename "$exe")" != "emstudio" ]]; then
+        link_into_bin "$exe" EMStudio
+      fi
       ;;
   esac
 }
@@ -854,6 +930,8 @@ ensure_writable() {
   mkdir -p "$d"
 }
 
+ensure_writable "$INSTALL_PREFIX"
+ensure_writable "$INSTALL_PREFIX/lib/room-stack"
 for t in "${TOOLS[@]}"; do
   ensure_writable "$(prefix_for "$t")"
 done
@@ -865,6 +943,8 @@ done
 
 info "Done."
 echo
+echo "Prefix:  $INSTALL_PREFIX"
 echo "Flavor:  $FLAVOR"
 echo "PATH:    export PATH=\"$BIN_DIR:\$PATH\""
 echo "Tools:   ${TOOLS[*]}"
+echo "Tree:    $INSTALL_PREFIX/bin/  +  $INSTALL_PREFIX/lib/room-stack/<tool>/"

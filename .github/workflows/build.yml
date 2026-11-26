@@ -677,19 +677,28 @@ jobs:
       - name: Install Door from local CI tar
         env:
           GH_TOKEN: ${{ github.token }}
-          DOOR_PREFIX: /tmp/room-stack/door
-          BIN_DIR: /tmp/room-stack/bin
         run: |
           set -euo pipefail
           TAR="$(find /tmp/door-ci-artifact -type f \( -name '*.tar.gz' -o -name '*.tgz' \) | head -n1)"
           test -n "$TAR"
           echo "Using tar: $TAR"
+          PREFIX=/tmp/room-stack
           bash scripts/install_room_stack_from_ci.sh \
             --yes --force-ci --flavor ubuntu24 --tools door \
+            --prefix "$PREFIX" \
             --from-tar "$TAR"
-          test -e "$BIN_DIR/door"
-          test -x "$(readlink -f "$BIN_DIR/door")"
-          echo "Installed door -> $(readlink -f "$BIN_DIR/door")"
-          ls -la "$DOOR_PREFIX" | head
-          test -f "$DOOR_PREFIX/BUNDLE_SOURCE.txt"
-          cat "$DOOR_PREFIX/BUNDLE_SOURCE.txt"
+          test -e "$PREFIX/bin/door"
+          test -x "$(readlink -f "$PREFIX/bin/door")"
+          echo "Installed door -> $(readlink -f "$PREFIX/bin/door")"
+          ls -la "$PREFIX/lib/room-stack/door" | head
+          test -f "$PREFIX/lib/room-stack/door/BUNDLE_SOURCE.txt"
+          cat "$PREFIX/lib/room-stack/door/BUNDLE_SOURCE.txt"
+          # Shared-prefix must keep siblings when a second tool dir is pre-seeded
+          mkdir -p "$PREFIX/lib/room-stack/dummy-sibling"
+          echo keep > "$PREFIX/lib/room-stack/dummy-sibling/marker"
+          bash scripts/install_room_stack_from_ci.sh \
+            --yes --force-ci --flavor ubuntu24 --tools door \
+            --prefix "$PREFIX" \
+            --from-tar "$TAR"
+          test -f "$PREFIX/lib/room-stack/dummy-sibling/marker"
+          test -e "$PREFIX/bin/door"
