@@ -189,16 +189,62 @@ read_secret() {
   printf '%s' "$value"
 }
 
+# Strip CR/LF/BOM/control chars that break HTTP Authorization headers.
+sanitize_gh_token() {
+  # Prefer python for reliable binary-safe cleanup (openssl decrypt may keep \r).
+  ROOM_STACK_RAW_TOKEN="$1" python3 -c 'import os,sys
+b=os.environ.get("ROOM_STACK_RAW_TOKEN","").encode("utf-8", "surrogateescape")
+if b.startswith(b"\xef\xbb\xbf"):
+    b=b[3:]
+b=bytes(ch for ch in b if 32 <= ch < 127)
+sys.stdout.buffer.write(b.strip())
+' 2>/dev/null || printf '%s' "$1" | tr -d '\r\n\000' | tr -d '[:space:]'
+}
+
+validate_gh_token_shape() {
+  local token="$1"
+  case "$token" in
+    ghp_*|gho_*|ghu_*|ghs_*|ghr_*|github_pat_*)
+      [[ ${#token} -ge 20 ]] || return 1
+      return 0
+      ;;
+    *) return 1 ;;
+  esac
+}
+
+# Ensure GH_TOKEN is clean and accepted by api.github.com before downloads.
+apply_gh_token() {
+  local raw="$1" source_msg="$2" token
+  token="$(sanitize_gh_token "$raw")"
+  if [[ -z "$token" ]]; then
+    die "GitHub token empty after sanitize ($source_msg). Re-run: $0 --forget-token"
+  fi
+  if ! validate_gh_token_shape "$token"; then
+    die "GitHub token looks invalid ($source_msg). Expected ghp_… / github_pat_…. Re-run: $0 --forget-token"
+  fi
+  export GH_TOKEN="$token"
+  # Drop any stale gh config token that could also inject a bad Authorization header.
+  unset GITHUB_TOKEN 2>/dev/null || true
+  if ! gh api user -q .login >/dev/null 2>&1; then
+    unset GH_TOKEN
+    die "GitHub rejected the token ($source_msg). Check scopes (public_repo / Actions:Read) or run: $0 --forget-token"
+  fi
+  info "GitHub auth OK ($source_msg) as $(gh api user -q .login 2>/dev/null || echo '?')"
+}
+
 # AES-256-CBC + PBKDF2 via openssl; passphrase never stored.
 encrypt_token_to_store() {
   local token="$1" pass="$2"
+  token="$(sanitize_gh_token "$token")"
   command -v openssl >/dev/null 2>&1 || die "openssl required to encrypt the PAT store"
   mkdir -p "$(dirname "$TOKEN_STORE_FILE")"
   chmod 700 "$(dirname "$TOKEN_STORE_FILE")" 2>/dev/null || true
   local tmp
   tmp="$(mktemp)"
   umask 077
-  if ! printf '%s' "$token" | openssl enc -aes-256-cbc -pbkdf2 -iter 200000 -salt \
+  # Write token via env→python to avoid shell/printf newline surprises.
+  if ! ROOM_STACK_RAW_TOKEN="$token" python3 -c 'import os,sys; sys.stdout.buffer.write(os.environ["ROOM_STACK_RAW_TOKEN"].encode())' \
+      | openssl enc -aes-256-cbc -pbkdf2 -iter 200000 -salt \
       -pass "pass:$pass" -out "$tmp" 2>/dev/null; then
     rm -f "$tmp"
     die "failed to encrypt PAT (openssl enc)"
@@ -211,8 +257,15 @@ decrypt_token_from_store() {
   local pass="$1" out=""
   command -v openssl >/dev/null 2>&1 || return 1
   [[ -r "$TOKEN_STORE_FILE" ]] || return 1
+  # Binary-safe decrypt → sanitize (strips CR that breaks Authorization).
   out="$(openssl enc -d -aes-256-cbc -pbkdf2 -iter 200000 \
-      -pass "pass:$pass" -in "$TOKEN_STORE_FILE" 2>/dev/null)" || return 1
+      -pass "pass:$pass" -in "$TOKEN_STORE_FILE" 2>/dev/null | python3 -c 'import sys
+b=sys.stdin.buffer.read()
+if b.startswith(b"\xef\xbb\xbf"):
+    b=b[3:]
+b=bytes(ch for ch in b if 32 <= ch < 127)
+sys.stdout.buffer.write(b.strip())
+')" || return 1
   [[ -n "$out" ]] || return 1
   printf '%s' "$out"
 }
@@ -263,6 +316,10 @@ load_token_from_encrypted_store() {
     echo "WARNING: could not decrypt PAT store (wrong passphrase?)." >&2
     return 1
   }
+  # Rewrite a cleaned copy so future unlocks do not keep a dirty \r token.
+  if command -v openssl >/dev/null 2>&1; then
+    encrypt_token_to_store "$token" "$pass" 2>/dev/null || true
+  fi
   printf '%s' "$token"
 }
 
@@ -276,32 +333,32 @@ forget_token_store() {
   exit 0
 }
 
-# Prefer env token; else gh login; else encrypted store; else prompt for a PAT.
+# Prefer env token; else encrypted store; else gh login; else prompt for a PAT.
 ensure_gh_auth() {
   local token=""
   if [[ -n "${GH_TOKEN:-}" ]]; then
-    token="$GH_TOKEN"
-  elif [[ -n "${GITHUB_TOKEN:-}" ]]; then
-    token="$GITHUB_TOKEN"
-  elif [[ -n "${GH_TOKEN_FILE:-}" ]]; then
-    [[ -r "$GH_TOKEN_FILE" ]] || die "GH_TOKEN_FILE not readable: $GH_TOKEN_FILE"
-    token="$(tr -d '\r\n' <"$GH_TOKEN_FILE")"
-  fi
-
-  if [[ -n "$token" ]]; then
-    export GH_TOKEN="$token"
-    info "GitHub auth: using token from environment"
+    apply_gh_token "$GH_TOKEN" "environment GH_TOKEN"
     return
   fi
-
-  if gh auth status >/dev/null 2>&1; then
-    info "GitHub auth: existing gh login OK"
+  if [[ -n "${GITHUB_TOKEN:-}" ]]; then
+    apply_gh_token "$GITHUB_TOKEN" "environment GITHUB_TOKEN"
+    return
+  fi
+  if [[ -n "${GH_TOKEN_FILE:-}" ]]; then
+    [[ -r "$GH_TOKEN_FILE" ]] || die "GH_TOKEN_FILE not readable: $GH_TOKEN_FILE"
+    token="$(python3 -c 'import sys; sys.stdout.buffer.write(open(sys.argv[1],"rb").read())' "$GH_TOKEN_FILE")"
+    apply_gh_token "$token" "GH_TOKEN_FILE"
     return
   fi
 
   if token="$(load_token_from_encrypted_store)"; then
-    export GH_TOKEN="$token"
-    info "GitHub auth: unlocked encrypted PAT store"
+    apply_gh_token "$token" "encrypted store"
+    return
+  fi
+
+  # Only trust gh login if it can actually call the API (avoids stale bad headers).
+  if gh auth status >/dev/null 2>&1 && gh api user -q .login >/dev/null 2>&1; then
+    info "GitHub auth: existing gh login OK as $(gh api user -q .login 2>/dev/null)"
     return
   fi
 
@@ -317,12 +374,12 @@ ensure_gh_auth() {
   echo "  (Fine-grained: Actions=Read on Door/Qucs/Xschem/KLayout/EMStudio repos.)"
   token="$(read_secret "Paste PAT: ")"
   [[ -n "$token" ]] || die "empty PAT"
-  export GH_TOKEN="$token"
+  apply_gh_token "$token" "pasted PAT"
 
   prompt_and_save_encrypted_token "$GH_TOKEN"
 
   # Best-effort gh login for other tools (ignore keyring failures).
-  if printf '%s\n' "$GH_TOKEN" | gh auth login --hostname github.com --with-token >/dev/null 2>&1; then
+  if printf '%s' "$GH_TOKEN" | gh auth login --hostname github.com --with-token >/dev/null 2>&1; then
     info "GitHub auth: also saved via gh auth login"
   fi
 }
@@ -561,13 +618,16 @@ run_self_test() {
       ;;
   esac
 
+  _san="$(sanitize_gh_token $'ghp_abc123\r\n')"
+  assert_eq "$_san" "ghp_abc123" "sanitize strips CR/LF from PAT"
+
   if command -v openssl >/dev/null 2>&1; then
     local _prev_store="$TOKEN_STORE_FILE" _round
     TOKEN_STORE_FILE="$(mktemp)"
     rm -f "$TOKEN_STORE_FILE"
-    encrypt_token_to_store "ghp_test_token_value" "test-pass-phrase"
+    encrypt_token_to_store $'ghp_test_token_value\r' "test-pass-phrase"
     _round="$(decrypt_token_from_store "test-pass-phrase")"
-    assert_eq "$_round" "ghp_test_token_value" "openssl token encrypt/decrypt roundtrip"
+    assert_eq "$_round" "ghp_test_token_value" "openssl token encrypt/decrypt strips CR"
     rm -f "$TOKEN_STORE_FILE"
     TOKEN_STORE_FILE="$_prev_store"
   else
