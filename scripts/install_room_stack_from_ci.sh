@@ -1076,6 +1076,51 @@ PY
   fi
 }
 
+# Older xschem CI bundles shipped room.tcl without room_lock.tcl / primitive_cache.
+# Pull the missing integration files from the Xschem-roomdb repo so launch works now.
+repair_xschem_integrations() {
+  local prefix="$1"
+  local integ stage tarball src
+  integ="$(find "$prefix" -type d -path '*/integrations' | head -n1 || true)"
+  [[ -n "$integ" ]] || return 0
+
+  local need=0
+  [[ -f "$integ/room_lock.tcl" ]] || need=1
+  [[ -f "$integ/xschem-batch.rc" ]] || need=1
+  [[ -d "$integ/primitive_cache" ]] || need=1
+  [[ "$need" -eq 1 ]] || {
+    info "Xschem integrations OK ($integ)"
+    return 0
+  }
+
+  info "Repairing Xschem integrations under $integ (fetch from $REPO_XSCHEM)"
+  stage="${INSTALL_PREFIX}/lib/room-stack/.xschem-integ-$$"
+  rm -rf "$stage"
+  mkdir -p "$stage"
+  tarball="$stage/xschem-src.tgz"
+  download_url "https://codeload.github.com/${REPO_XSCHEM}/tar.gz/refs/heads/main" "$tarball" \
+    || die "failed to download Xschem-roomdb source for integrations repair"
+  tar -xzf "$tarball" -C "$stage"
+  src="$(find "$stage" -type d -path '*/integrations' | head -n1 || true)"
+  [[ -n "$src" ]] || die "integrations/ not found in Xschem-roomdb tarball"
+
+  for _f in room_lock.tcl xschem-batch.rc room.tcl; do
+    if [[ -f "$src/$_f" ]]; then
+      cp -a "$src/$_f" "$integ/"
+    fi
+  done
+  if [[ -d "$src/primitive_cache" && ! -d "$integ/primitive_cache" ]]; then
+    cp -a "$src/primitive_cache" "$integ/"
+  fi
+  if [[ -d "$src/qucs_symbols" && ! -d "$integ/qucs_symbols" ]]; then
+    cp -a "$src/qucs_symbols" "$integ/"
+  fi
+  rm -rf "$stage"
+  [[ -f "$integ/room_lock.tcl" ]] \
+    || die "repair failed: $integ/room_lock.tcl still missing"
+  info "Xschem integrations repaired"
+}
+
 install_one() {
   local tool="$1" prefix="$2"
   local repo artifact exe
@@ -1108,6 +1153,7 @@ install_one() {
       exe="$(find_exec "$prefix" xschem-run.sh xschem)" \
         || die "xschem binary not found under $prefix"
       patch_run_script_symlink_safe "$exe"
+      repair_xschem_integrations "$prefix"
       link_into_bin "$exe" xschem
       ;;
     klayout)
