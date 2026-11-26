@@ -265,39 +265,54 @@ apply_gh_token() {
 }
 
 # AES-256-CBC + PBKDF2 via openssl; passphrase never stored.
+# Use -pass env:… so '$' / '!' in the passphrase cannot be expanded by the shell.
 encrypt_token_to_store() {
   local token="$1" pass="$2"
   token="$(sanitize_gh_token "$token")"
   command -v openssl >/dev/null 2>&1 || die "openssl required to encrypt the PAT store"
   mkdir -p "$(dirname "$TOKEN_STORE_FILE")"
   chmod 700 "$(dirname "$TOKEN_STORE_FILE")" 2>/dev/null || true
-  local tmp
+  local tmp plain
   tmp="$(mktemp)"
+  plain="$(mktemp)"
   umask 077
-  # Write token via env→python to avoid shell/printf newline surprises.
-  if ! ROOM_STACK_RAW_TOKEN="$token" python3 -c 'import os,sys; sys.stdout.buffer.write(os.environ["ROOM_STACK_RAW_TOKEN"].encode())' \
-      | openssl enc -aes-256-cbc -pbkdf2 -iter 200000 -salt \
-      -pass "pass:$pass" -out "$tmp" 2>/dev/null; then
-    rm -f "$tmp"
+  # Write plaintext token to a temp file (env can mangle exotic bytes on some hosts).
+  if ! ROOM_STACK_RAW_TOKEN="$token" python3 -c \
+      'import os,sys; sys.stdout.buffer.write(os.environ["ROOM_STACK_RAW_TOKEN"].encode())' \
+      >"$plain"; then
+    rm -f "$tmp" "$plain"
+    die "failed to stage PAT for encryption"
+  fi
+  if ! ROOM_STACK_PASS="$pass" openssl enc -aes-256-cbc -pbkdf2 -iter 200000 -salt \
+      -pass env:ROOM_STACK_PASS -in "$plain" -out "$tmp" 2>/dev/null; then
+    rm -f "$tmp" "$plain"
     die "failed to encrypt PAT (openssl enc)"
   fi
+  rm -f "$plain"
   mv -f "$tmp" "$TOKEN_STORE_FILE"
   chmod 600 "$TOKEN_STORE_FILE" 2>/dev/null || true
 }
 
 decrypt_token_from_store() {
-  local pass="$1" out=""
+  local pass="$1" plain out=""
   command -v openssl >/dev/null 2>&1 || return 1
   [[ -r "$TOKEN_STORE_FILE" ]] || return 1
-  # Binary-safe decrypt → sanitize (strips CR that breaks Authorization).
-  out="$(openssl enc -d -aes-256-cbc -pbkdf2 -iter 200000 \
-      -pass "pass:$pass" -in "$TOKEN_STORE_FILE" 2>/dev/null | python3 -c 'import sys
-b=sys.stdin.buffer.read()
+  plain="$(mktemp)"
+  # Decrypt to a file so we can check openssl's exit status (pipelines + bad
+  # passphrase can still emit printable garbage on stdout).
+  if ! ROOM_STACK_PASS="$pass" openssl enc -d -aes-256-cbc -pbkdf2 -iter 200000 \
+      -pass env:ROOM_STACK_PASS -in "$TOKEN_STORE_FILE" -out "$plain" 2>/dev/null; then
+    rm -f "$plain"
+    return 1
+  fi
+  out="$(python3 -c 'import sys
+b=open(sys.argv[1],"rb").read()
 if b.startswith(b"\xef\xbb\xbf"):
     b=b[3:]
 b=bytes(ch for ch in b if 32 <= ch < 127)
 sys.stdout.buffer.write(b.strip())
-')" || return 1
+' "$plain")" || { rm -f "$plain"; return 1; }
+  rm -f "$plain"
   [[ -n "$out" ]] || return 1
   printf '%s' "$out"
 }
@@ -334,7 +349,7 @@ prompt_and_save_encrypted_token() {
 
 load_token_from_encrypted_store() {
   [[ -r "$TOKEN_STORE_FILE" ]] || return 1
-  local pass token
+  local pass token prefix
   if [[ -n "${ROOM_STACK_PASSPHRASE:-}" ]]; then
     pass="$ROOM_STACK_PASSPHRASE"
   elif [[ "$YES" -eq 1 ]]; then
@@ -348,7 +363,17 @@ load_token_from_encrypted_store() {
     echo "WARNING: could not decrypt PAT store (wrong passphrase?)." >&2
     return 1
   }
-  # Rewrite a cleaned copy so future unlocks do not keep a dirty \r token.
+  token="$(sanitize_gh_token "$token")"
+  # Never rewrite the store with a non-PAT blob — a bad passphrase on some
+  # OpenSSL builds can still produce printable junk and would permanently
+  # corrupt github_token.enc.
+  if ! validate_gh_token_shape "$token"; then
+    prefix="$(printf '%s' "$token" | cut -c1-4)"
+    echo "WARNING: unlocked blob is not a GitHub PAT (wrong passphrase or corrupt store)." >&2
+    echo "  length=${#token} prefix='${prefix}…'  Fix: $0 --forget-token  then paste a new PAT." >&2
+    return 1
+  fi
+  # Rewrite only a validated, sanitized PAT (drops lingering CR from older stores).
   if command -v openssl >/dev/null 2>&1; then
     encrypt_token_to_store "$token" "$pass" 2>/dev/null || true
   fi
@@ -814,6 +839,15 @@ run_self_test() {
     encrypt_token_to_store $'ghp_test_token_value\r' "test-pass-phrase"
     _round="$(decrypt_token_from_store "test-pass-phrase")"
     assert_eq "$_round" "ghp_test_token_value" "openssl token encrypt/decrypt strips CR"
+    encrypt_token_to_store "ghp_special_pass_token_xx" 'p$a:ss!word'
+    _round="$(decrypt_token_from_store 'p$a:ss!word')"
+    assert_eq "$_round" "ghp_special_pass_token_xx" "openssl pass env handles \$/! in passphrase"
+    if _round="$(decrypt_token_from_store "wrong-passphrase")"; then
+      echo "FAIL: decrypt with wrong passphrase succeeded unexpectedly" >&2
+      fail=1
+    else
+      echo "OK: wrong passphrase fails decrypt"
+    fi
     rm -f "$TOKEN_STORE_FILE"
     TOKEN_STORE_FILE="$_prev_store"
   else
