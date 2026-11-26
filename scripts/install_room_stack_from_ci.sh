@@ -1138,6 +1138,7 @@ PY
     "artifact_id=$ART_ID" \
     "created_at=$CREATED" \
     "workflow_run=$RUN_HINT"
+  restore_payload_exec_bits "$out_dir"
 }
 
 install_from_tar() {
@@ -1147,6 +1148,21 @@ install_from_tar() {
   write_bundle_source "$out_dir" \
     "source=local-tar" \
     "tar=$tar_path"
+  restore_payload_exec_bits "$out_dir"
+}
+
+# GitHub Actions artifact zips drop the executable bit; launchers then fail with
+# "Permission denied" on EMStudio.bin / door / klayout / *.sh.
+restore_payload_exec_bits() {
+  local root="$1"
+  [[ -d "$root" ]] || return 0
+  find "$root" -type f \( \
+      -name '*.sh' -o -name '*.bin' -o -name '*-run.sh' \
+      -o -name 'door' -o -name 'EMStudio' -o -name 'emstudio' \
+      -o -name 'klayout' -o -name 'xschem' -o -name 'qucs-s' -o -name 'qucs' \
+      -o -name 'gds_to_*' -o -name 'room_to_*' -o -name '*_to_room' -o -name '*_to_qucs' \
+      -o -name '*_to_xschem' -o -name '*_to_gds' -o -name '*_to_json' \
+    \) -exec chmod +x {} + 2>/dev/null || true
 }
 
 find_exec() {
@@ -1157,6 +1173,10 @@ find_exec() {
     hit="$(find "$root" -type f -name "$name" 2>/dev/null | head -n1 || true)"
     if [[ -n "$hit" ]]; then
       chmod +x "$hit" 2>/dev/null || true
+      # Companion ELF next to a launcher (EMStudio → EMStudio.bin).
+      if [[ -f "${hit}.bin" ]]; then
+        chmod +x "${hit}.bin" 2>/dev/null || true
+      fi
       echo "$hit"
       return 0
     fi
@@ -1422,7 +1442,12 @@ install_one() {
     emstudio)
       exe="$(find_exec "$prefix" EMStudio emstudio)" \
         || die "EMStudio launcher/binary not found under $prefix"
+      restore_payload_exec_bits "$prefix"
       patch_run_script_symlink_safe "$exe"
+      # Launcher execs sibling EMStudio.bin — must be +x after Actions zip extract.
+      if [[ -f "$(dirname "$exe")/EMStudio.bin" ]]; then
+        chmod +x "$(dirname "$exe")/EMStudio.bin"
+      fi
       link_into_bin "$exe" emstudio
       if [[ "$(basename "$exe")" != "emstudio" ]]; then
         link_into_bin "$exe" EMStudio
