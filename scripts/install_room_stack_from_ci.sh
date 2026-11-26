@@ -224,6 +224,22 @@ validate_gh_token_shape() {
   esac
 }
 
+# Probe that works for classic/fine-grained PATs *and* Actions GITHUB_TOKEN
+# (installation tokens often 403 on GET /user).
+gh_token_works() {
+  gh api rate_limit -q .rate.limit >/dev/null 2>&1
+}
+
+gh_token_identity() {
+  local login
+  login="$(gh api user -q .login 2>/dev/null || true)"
+  if [[ -n "$login" ]]; then
+    printf '%s' "$login"
+    return 0
+  fi
+  printf '%s' "token"
+}
+
 # Ensure GH_TOKEN is clean and accepted by api.github.com before downloads.
 apply_gh_token() {
   local raw="$1" source_msg="$2" token
@@ -232,16 +248,20 @@ apply_gh_token() {
     die "GitHub token empty after sanitize ($source_msg). Re-run: $0 --forget-token"
   fi
   if ! validate_gh_token_shape "$token"; then
-    die "GitHub token looks invalid ($source_msg). Expected ghp_… / github_pat_…. Re-run: $0 --forget-token"
+    die "GitHub token looks invalid ($source_msg). Expected ghp_… / github_pat_… / ghs_…. Re-run: $0 --forget-token"
   fi
   export GH_TOKEN="$token"
-  # Drop any stale gh config token that could also inject a bad Authorization header.
-  unset GITHUB_TOKEN 2>/dev/null || true
-  if ! gh api user -q .login >/dev/null 2>&1; then
+  # Prefer GH_TOKEN; keep GITHUB_TOKEN only if it was the source (Actions sets both aliases).
+  if [[ "$source_msg" != *GITHUB_TOKEN* ]]; then
+    unset GITHUB_TOKEN 2>/dev/null || true
+  else
+    export GITHUB_TOKEN="$token"
+  fi
+  if ! gh_token_works; then
     unset GH_TOKEN
     die "GitHub rejected the token ($source_msg). Check scopes (public_repo / Actions:Read) or run: $0 --forget-token"
   fi
-  info "GitHub auth OK ($source_msg) as $(gh api user -q .login 2>/dev/null || echo '?')"
+  info "GitHub auth OK ($source_msg) as $(gh_token_identity)"
 }
 
 # AES-256-CBC + PBKDF2 via openssl; passphrase never stored.
@@ -369,8 +389,9 @@ ensure_gh_auth() {
   fi
 
   # Only trust gh login if it can actually call the API (avoids stale bad headers).
-  if gh auth status >/dev/null 2>&1 && gh api user -q .login >/dev/null 2>&1; then
-    info "GitHub auth: existing gh login OK as $(gh api user -q .login 2>/dev/null)"
+  # Use rate_limit — Actions GITHUB_TOKEN often cannot call GET /user.
+  if gh auth status >/dev/null 2>&1 && gh_token_works; then
+    info "GitHub auth: existing gh login OK as $(gh_token_identity)"
     return
   fi
 
