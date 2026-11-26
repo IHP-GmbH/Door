@@ -191,9 +191,12 @@ MainWindow::MainWindow(const QString &projFile, const QString &runDir, QWidget *
     m_ui->actionUnion->setEnabled(false);
     m_ui->actionCategory->setEnabled(false);
 
+    // Migrate before building the Recent menu so LIBAMN → DOOR keys are visible.
+    migrateLibamnSettingsToDoor();
     initRecentProjectMenu();
 
     loadSettings();
+    updateRecentProjectActions();
     applyKeyBindings();
     warmWslForXschemIfNeeded();
 

@@ -36,7 +36,10 @@ inline QString roomPackageDirFromConfiguredPath(const QString &configured)
 }
 
 /*!*********************************************************************************************************************
- * \brief One-shot copy of legacy ``LIBAMN`` QSettings into ``DOOR`` when the new store is empty.
+ * \brief Copy missing legacy ``LIBAMN`` QSettings keys into ``DOOR`` (partial stores included).
+ *
+ * Door may create a non-empty ``DOOR`` store (e.g. Tools/RoomPath) before RecentProjects are
+ * migrated; only skipping when ``DOOR`` is completely empty would drop the recent-project list.
  **********************************************************************************************************************/
 inline void migrateLibamnSettingsToDoor()
 {
@@ -46,20 +49,32 @@ inline void migrateLibamnSettingsToDoor()
     }
     done = true;
 
-    QSettings door(QStringLiteral("DOOR"));
-    if (!door.allKeys().isEmpty()) {
-        return;
-    }
-
     QSettings legacy(QStringLiteral("LIBAMN"));
     const QStringList keys = legacy.allKeys();
     if (keys.isEmpty()) {
         return;
     }
+
+    QSettings door(QStringLiteral("DOOR"));
+    bool changed = false;
     for (const QString &key : keys) {
-        door.setValue(key, legacy.value(key));
+        const QVariant legacyValue = legacy.value(key);
+        if (!door.contains(key)) {
+            door.setValue(key, legacyValue);
+            changed = true;
+            continue;
+        }
+        // Recover empty recent list if DOOR was created without it.
+        if (key == QLatin1String("RecentProjects/RecentProjList")
+            && door.value(key).toStringList().isEmpty()
+            && !legacyValue.toStringList().isEmpty()) {
+            door.setValue(key, legacyValue);
+            changed = true;
+        }
     }
-    door.sync();
+    if (changed) {
+        door.sync();
+    }
 }
 
 /*!*********************************************************************************************************************
