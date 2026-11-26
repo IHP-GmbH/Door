@@ -103,7 +103,8 @@ while [[ $# -gt 0 ]]; do
 done
 
 die() { echo "ERROR: $*" >&2; exit 1; }
-info() { echo "==> $*"; }
+# Always stderr — callers capture stdout from helpers (e.g. token="$(load_…)").
+info() { echo "==> $*" >&2; }
 need() { command -v "$1" >/dev/null 2>&1 || die "missing dependency: $1"; }
 
 need python3
@@ -196,6 +197,8 @@ read_secret() {
   local prompt="$1" value=""
   read -r -s -p "$prompt" value || true
   echo >&2
+  # Drop CR from Windows/paste; Enter itself is not part of $value with read -s.
+  value="${value//$'\r'/}"
   value="${value#"${value%%[![:space:]]*}"}"
   value="${value%"${value##*[![:space:]]}"}"
   printf '%s' "$value"
@@ -831,6 +834,10 @@ run_self_test() {
 
   _san="$(sanitize_gh_token $'ghp_abc123\r\n')"
   assert_eq "$_san" "ghp_abc123" "sanitize strips CR/LF from PAT"
+
+  # info must not pollute stdout (breaks token="$(load_token_from_encrypted_store)").
+  _info_out="$(info "probe" 2>/dev/null || true)"
+  assert_eq "$_info_out" "" "info writes only to stderr"
 
   if command -v openssl >/dev/null 2>&1; then
     local _prev_store="$TOKEN_STORE_FILE" _round
