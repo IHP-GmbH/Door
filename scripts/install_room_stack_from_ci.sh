@@ -26,6 +26,8 @@
 #   --update         only check/install updates for tools already under --prefix
 #                    (or only --tools if given). Skips tools whose CI artifact_id matches
 #                    BUNDLE_SOURCE.txt. Implies no interactive tool menu.
+#   --no-seed-settings  do not write Door QSettings (~/.config/DOOR.conf) defaults
+#   --seed-settings     force writing Door tool paths even if settings already exist
 #   --dry-run        print plan / CI status; do not download or install
 #   --self-test      run offline mapping assertions and exit
 #   --from-tar FILE  install one tool from a local .tar.gz (requires --tools with one entry)
@@ -46,6 +48,8 @@ DRY_RUN=0
 SELF_TEST=0
 FORGET_TOKEN=0
 UPDATE_MODE=0
+SEED_SETTINGS=1
+FORCE_SEED_SETTINGS=0
 FLAVOR_FORCE=""
 TOOLS_CSV="all"
 TOOLS_EXPLICIT=0
@@ -73,7 +77,7 @@ WORKFLOW_KLAYOUT="${WORKFLOW_KLAYOUT:-CI}"
 WORKFLOW_EMSTUDIO="${WORKFLOW_EMSTUDIO:-Build EMStudio}"
 
 usage() {
-  sed -n '2,46p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '2,48p' "$0" | sed 's/^# \{0,1\}//'
   exit 0
 }
 
@@ -86,6 +90,8 @@ while [[ $# -gt 0 ]]; do
     --self-test) SELF_TEST=1 ;;
     --forget-token) FORGET_TOKEN=1 ;;
     --update) UPDATE_MODE=1 ;;
+    --no-seed-settings) SEED_SETTINGS=0 ;;
+    --seed-settings) SEED_SETTINGS=1; FORCE_SEED_SETTINGS=1 ;;
     --flavor) FLAVOR_FORCE="${2:-}"; shift ;;
     --prefix) PREFIX_OPT="${2:-}"; shift ;;
     --tools) TOOLS_CSV="${2:-}"; TOOLS_EXPLICIT=1; shift ;;
@@ -1406,6 +1412,210 @@ for t in "${TOOLS[@]}"; do
   install_one "$t" "$(prefix_for "$t")"
 done
 
+# Migrate legacy ~/.config/LIBAMN.conf → DOOR.conf and seed Tools paths from this install.
+door_settings_conf() {
+  echo "${XDG_CONFIG_HOME:-$HOME/.config}/DOOR.conf"
+}
+
+migrate_libamn_conf_file() {
+  local cfg_dir door legacy
+  cfg_dir="${XDG_CONFIG_HOME:-$HOME/.config}"
+  door="$cfg_dir/DOOR.conf"
+  legacy="$cfg_dir/LIBAMN.conf"
+  if [[ -f "$legacy" && ! -f "$door" ]]; then
+    mv "$legacy" "$door"
+    info "Migrated $legacy -> $door"
+  fi
+}
+
+# Prefer absolute launcher under BIN_DIR, else first match under a tool prefix.
+resolve_seed_bin() {
+  local name="$1" prefix="${2:-}"
+  if [[ -n "${BIN_DIR:-}" && -x "$BIN_DIR/$name" ]]; then
+    readlink -f "$BIN_DIR/$name" 2>/dev/null || realpath "$BIN_DIR/$name" 2>/dev/null || echo "$BIN_DIR/$name"
+    return 0
+  fi
+  if [[ -n "$prefix" ]]; then
+    local found
+    found="$(find_exec "$prefix" "$name" 2>/dev/null || true)"
+    if [[ -n "$found" ]]; then
+      readlink -f "$found" 2>/dev/null || realpath "$found" 2>/dev/null || echo "$found"
+      return 0
+    fi
+  fi
+  return 1
+}
+
+seed_door_settings() {
+  [[ "${SEED_SETTINGS:-1}" -eq 1 ]] || {
+    info "Skipping Door settings seed (--no-seed-settings)"
+    return 0
+  }
+
+  migrate_libamn_conf_file
+  local conf
+  conf="$(door_settings_conf)"
+  mkdir -p "$(dirname "$conf")"
+
+  local schematic="" layout="" em="" room_path=""
+  local qucs_bin="" xschem_bin="" klayout_bin="" em_bin=""
+  local door_p qucs_p xschem_p klayout_p em_p
+
+  door_p="${DOOR_PREFIX:-$(prefix_for door 2>/dev/null || true)}"
+  qucs_p="${QUCS_PREFIX:-$(prefix_for qucs 2>/dev/null || true)}"
+  xschem_p="${XSCHEM_PREFIX:-$(prefix_for xschem 2>/dev/null || true)}"
+  klayout_p="${KLAYOUT_PREFIX:-$(prefix_for klayout 2>/dev/null || true)}"
+  em_p="${EMSTUDIO_PREFIX:-$(prefix_for emstudio 2>/dev/null || true)}"
+
+  if [[ -n "$door_p" && -f "$door_p/python/room/__init__.py" ]]; then
+    room_path="$(cd "$door_p/python" && pwd)"
+  else
+    # door-run.sh may live deeper than the payload root after unpack.
+    local py
+    py="$(find "${door_p:-/nonexistent}" -type f -path '*/python/room/__init__.py' 2>/dev/null | head -n1 || true)"
+    if [[ -n "$py" ]]; then
+      room_path="$(cd "$(dirname "$(dirname "$py")")" && pwd)"
+    fi
+  fi
+
+  qucs_bin="$(resolve_seed_bin qucs-s "$qucs_p" || true)"
+  xschem_bin="$(resolve_seed_bin xschem "$xschem_p" || true)"
+  klayout_bin="$(resolve_seed_bin klayout "$klayout_p" || true)"
+  em_bin="$(resolve_seed_bin emstudio "$em_p" || true)"
+  [[ -n "$em_bin" ]] || em_bin="$(resolve_seed_bin EMStudio "$em_p" || true)"
+
+  # Prefer xschem as primary Schematic path when both exist (matches common Door setups).
+  if [[ -n "$xschem_bin" ]]; then
+    schematic="$xschem_bin"
+  elif [[ -n "$qucs_bin" ]]; then
+    schematic="$qucs_bin"
+  fi
+  [[ -n "$klayout_bin" ]] && layout="$klayout_bin"
+  [[ -n "$em_bin" ]] && em="$em_bin"
+
+  if [[ -z "$schematic$layout$em$room_path" ]]; then
+    info "No installed tool paths to seed into Door settings"
+    return 0
+  fi
+
+  # Patch only [Tools] keys so Qt Appearance blobs stay intact.
+  FORCE_SEED_SETTINGS="${FORCE_SEED_SETTINGS:-0}" python3 - "$conf" \
+    "$schematic" "$layout" "$em" "$room_path" \
+    "$xschem_bin" "$qucs_bin" "$klayout_bin" "$em_bin" <<'PY'
+import json, os, re, sys
+
+conf, schematic, layout, em, room_path, xschem, qucs, klayout, em_bin = sys.argv[1:10]
+force = os.environ.get("FORCE_SEED_SETTINGS", "0") == "1"
+
+text = ""
+if os.path.isfile(conf):
+    with open(conf, "r", encoding="utf-8", errors="replace") as f:
+        text = f.read()
+
+def tools_section_body(src: str) -> str:
+    m = re.search(r"(?ms)^\[Tools\]\s*\n(.*?)(?=^\[|\Z)", src)
+    return m.group(1) if m else ""
+
+body = tools_section_body(text)
+
+def get_key(body: str, key: str) -> str:
+    m = re.search(rf"(?m)^{re.escape(key)}=(.*)$", body)
+    return (m.group(1).strip().strip('"') if m else "")
+
+already = any(get_key(body, k) for k in ("Schematic", "Layout", "SchematicTools", "LayoutTools", "EM", "EMTools"))
+if already and not force:
+    print(f"Door settings already present at {conf} — skip seed (use --seed-settings to overwrite)")
+    sys.exit(0)
+
+def tool_json(entries):
+    arr = [{"name": n, "path": p, "default": d} for n, p, d in entries if p]
+    return json.dumps(arr, separators=(",", ":"))
+
+sch_entries = []
+if xschem and qucs:
+    sch_entries = [("XSchem", xschem, True), ("Qucs-S", qucs, False)]
+elif xschem:
+    sch_entries = [("XSchem", xschem, True)]
+elif qucs:
+    sch_entries = [("Qucs-S", qucs, True)]
+
+lay_entries = [("Layout", klayout, True)] if klayout else []
+em_entries = [("EMStudio", em_bin, True)] if em_bin else []
+
+updates = {}
+tool_list = []
+if schematic or sch_entries:
+    tool_list.append("Schematic")
+if layout or lay_entries:
+    tool_list.append("Layout")
+if em or em_entries:
+    tool_list.append("EM")
+if tool_list:
+    updates["ToolList"] = ", ".join(tool_list)
+if schematic:
+    updates["Schematic"] = schematic
+if layout:
+    updates["Layout"] = layout
+if em:
+    updates["EM"] = em
+if sch_entries:
+    updates["SchematicTools"] = tool_json(sch_entries)
+    if not get_key(body, "SchematicViews"):
+        updates["SchematicViews"] = "cdl,spice,schematic,symbol"
+if lay_entries:
+    updates["LayoutTools"] = tool_json(lay_entries)
+    if not get_key(body, "LayoutViews"):
+        updates["LayoutViews"] = "gds,oas,lstr,layout"
+if em_entries:
+    updates["EMTools"] = tool_json(em_entries)
+    if not get_key(body, "EMViews"):
+        updates["EMViews"] = "emsetup"
+if room_path:
+    updates["RoomPath"] = room_path
+if not get_key(body, "SchematicSymbolFormat"):
+    updates["SchematicSymbolFormat"] = "ROOM"
+if not get_key(body, "Editor"):
+    updates["Editor"] = "nedit"
+
+def upsert_tools(src: str, kv: dict) -> str:
+    if not kv:
+        return src
+    m = re.search(r"(?ms)^(\[Tools\]\s*\n)(.*?)(?=^\[|\Z)", src)
+    if not m:
+        block = "[Tools]\n" + "".join(f"{k}={v}\n" for k, v in kv.items())
+        if src and not src.endswith("\n"):
+            src += "\n"
+        if src and not src.endswith("\n\n"):
+            src += "\n"
+        return src + block + ("\n" if not block.endswith("\n") else "")
+    head, sec = m.group(1), m.group(2)
+    lines = sec.splitlines(keepends=True)
+    keys_done = set()
+    out_lines = []
+    for line in lines:
+        km = re.match(r"^([^=\n]+)=(.*)$", line.rstrip("\n"))
+        if km and km.group(1) in kv:
+            key = km.group(1)
+            out_lines.append(f"{key}={kv[key]}\n")
+            keys_done.add(key)
+        else:
+            out_lines.append(line if line.endswith("\n") else line + "\n")
+    for key, val in kv.items():
+        if key not in keys_done:
+            out_lines.append(f"{key}={val}\n")
+    new_sec = "".join(out_lines)
+    return src[: m.start()] + head + new_sec + src[m.end() :]
+
+new_text = upsert_tools(text, updates)
+os.makedirs(os.path.dirname(conf) or ".", exist_ok=True)
+with open(conf, "w", encoding="utf-8", newline="\n") as f:
+    f.write(new_text)
+print(f"Seeded Door settings -> {conf}")
+PY
+}
+
+seed_door_settings
+
 info "Done."
 echo
 echo "Prefix:  $INSTALL_PREFIX"
@@ -1413,3 +1623,4 @@ echo "Flavor:  $FLAVOR"
 echo "PATH:    export PATH=\"$BIN_DIR:\$PATH\""
 echo "Tools:   ${TOOLS[*]}"
 echo "Tree:    $INSTALL_PREFIX/bin/  +  $INSTALL_PREFIX/lib/room-stack/<tool>/"
+echo "Settings:$(door_settings_conf)"

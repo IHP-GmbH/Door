@@ -472,6 +472,9 @@ void MainWindow::checkAndSaveProjectData(QCloseEvent *event)
  **********************************************************************************************************************/
 void MainWindow::loadSettings()
 {
+    // Former organization was LIBAMN; copy into DOOR once if needed.
+    migrateLibamnSettingsToDoor();
+
     QSettings settings(getSettingsHeaderName());
 
     settings.beginGroup("Appearance");

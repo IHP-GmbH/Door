@@ -698,11 +698,11 @@ inline QString MainWindow::getLibraryKeyPrefix() const
 }
 
 /*!*******************************************************************************************************************
- * \brief Returns header name used for storing LibMan settings.
+ * \brief Returns QSettings organization name (``DOOR``; formerly ``LIBAMN``).
  ********************************************************************************************************************/
 inline QString MainWindow::getSettingsHeaderName() const
 {
-    return "LIBAMN";
+    return QStringLiteral("DOOR");
 }
 
 /*!*******************************************************************************************************************

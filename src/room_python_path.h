@@ -36,11 +36,39 @@ inline QString roomPackageDirFromConfiguredPath(const QString &configured)
 }
 
 /*!*********************************************************************************************************************
- * \brief Reads Tools/RoomPath from the same QSettings store as MainWindow (``LIBAMN``).
+ * \brief One-shot copy of legacy ``LIBAMN`` QSettings into ``DOOR`` when the new store is empty.
+ **********************************************************************************************************************/
+inline void migrateLibamnSettingsToDoor()
+{
+    static bool done = false;
+    if (done) {
+        return;
+    }
+    done = true;
+
+    QSettings door(QStringLiteral("DOOR"));
+    if (!door.allKeys().isEmpty()) {
+        return;
+    }
+
+    QSettings legacy(QStringLiteral("LIBAMN"));
+    const QStringList keys = legacy.allKeys();
+    if (keys.isEmpty()) {
+        return;
+    }
+    for (const QString &key : keys) {
+        door.setValue(key, legacy.value(key));
+    }
+    door.sync();
+}
+
+/*!*********************************************************************************************************************
+ * \brief Reads Tools/RoomPath from the same QSettings store as MainWindow (``DOOR``).
  **********************************************************************************************************************/
 inline QString configuredRoomPathFromSettings()
 {
-    QSettings settings(QStringLiteral("LIBAMN"));
+    migrateLibamnSettingsToDoor();
+    QSettings settings(QStringLiteral("DOOR"));
     settings.beginGroup(QStringLiteral("Tools"));
     return settings.value(QStringLiteral("RoomPath")).toString().trimmed();
 }
