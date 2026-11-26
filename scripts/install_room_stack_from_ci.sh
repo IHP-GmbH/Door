@@ -1526,7 +1526,7 @@ repair_installed_tool() {
       patch_run_script_symlink_safe "$exe"
       attach_room_python "$prefix" || true
       exe="$(find_exec "$prefix" door-run.sh door)"
-      link_into_bin "$exe" doo
+      link_into_bin "$exe" door
       ;;
     qucs)
       exe="$(find_exec "$prefix" qucs-s-run.sh qucs-s qucs)" || return 0
