@@ -193,10 +193,11 @@ ensure_gh_auth() {
 
   echo
   info "GitHub PAT required to download Actions artifacts"
-  echo "  Create at: https://github.com/settings/tokens"
-  echo "  Classic: enable public_repo (enough for public repos)"
-  echo "  Or fine-grained: Actions = Read on Door / Qucs / Xschem / KLayout repos"
-  echo "  Token is kept in this shell only (exported as GH_TOKEN); not written to disk."
+  echo "  Open this link to generate a classic token (public_repo pre-checked):"
+  echo "  https://github.com/settings/tokens/new?scopes=public_repo&description=room-stack-ci-install"
+  echo "  Click Generate token, copy the ghp_… value, paste below."
+  echo "  (Fine-grained alternative: Actions=Read on Door/Qucs/Xschem/KLayout repos.)"
+  echo "  Token stays in this shell only (GH_TOKEN); not written to disk."
   # -s hides input; works for PAT paste
   read -r -s -p "Paste PAT: " token || true
   echo
