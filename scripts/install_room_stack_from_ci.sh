@@ -20,12 +20,14 @@
 #   --dry-run        print plan / CI status; do not download or install
 #   --self-test      run offline mapping assertions and exit
 #   --from-tar FILE  install one tool from a local .tar.gz (requires --tools with one entry)
+#   --forget-token   delete the encrypted PAT store and exit
 #
 # No sudo required: missing gh is downloaded into GH_BOOTSTRAP_DIR (~/.local/share/room-stack).
-# Auth: GH_TOKEN / GITHUB_TOKEN, else interactive PAT paste (classic public_repo is enough
-# for public artifact repos; needs Actions read).
+# Auth order: GH_TOKEN / GITHUB_TOKEN / GH_TOKEN_FILE → gh login → encrypted store
+# (~/.config/room-stack/github_token.enc, AES-256 + passphrase) → interactive PAT.
+# Classic public_repo is enough for public artifact repos.
 #
-# Requires: python3, tar, and curl or wget (to bootstrap gh if needed).
+# Requires: python3, tar, curl|wget (gh bootstrap); openssl (to save/load encrypted PAT).
 set -euo pipefail
 
 YES=0
@@ -33,6 +35,7 @@ WAIT_CI=0
 FORCE_CI=0
 DRY_RUN=0
 SELF_TEST=0
+FORGET_TOKEN=0
 FLAVOR_FORCE=""
 TOOLS_CSV="all"
 TOOLS_EXPLICIT=0
@@ -42,6 +45,8 @@ POLL_SEC="${POLL_SEC:-30}"
 ALL_TOOLS=(door qucs xschem klayout)
 # Fallback gh release if api.github.com is rate-limited / unreachable.
 GH_VERSION_FALLBACK="${GH_VERSION_FALLBACK:-2.82.1}"
+TOKEN_STORE_DIR="${ROOM_STACK_CONFIG_DIR:-$HOME/.config/room-stack}"
+TOKEN_STORE_FILE="${ROOM_STACK_TOKEN_FILE:-$TOKEN_STORE_DIR/github_token.enc}"
 
 REPO_DOOR="${REPO_DOOR:-IHP-GmbH/Door}"
 REPO_QUCS="${REPO_QUCS:-adatsuk/Qucs-S-roomdb}"
@@ -54,7 +59,7 @@ WORKFLOW_XSCHEM="${WORKFLOW_XSCHEM:-CI}"
 WORKFLOW_KLAYOUT="${WORKFLOW_KLAYOUT:-CI}"
 
 usage() {
-  sed -n '2,34p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '2,36p' "$0" | sed 's/^# \{0,1\}//'
   exit 0
 }
 
@@ -65,6 +70,7 @@ while [[ $# -gt 0 ]]; do
     --force-ci) FORCE_CI=1 ;;
     --dry-run) DRY_RUN=1 ;;
     --self-test) SELF_TEST=1 ;;
+    --forget-token) FORGET_TOKEN=1 ;;
     --flavor) FLAVOR_FORCE="${2:-}"; shift ;;
     --tools) TOOLS_CSV="${2:-}"; TOOLS_EXPLICIT=1; shift ;;
     --from-tar) FROM_TAR="${2:-}"; shift ;;
@@ -164,7 +170,103 @@ ensure_gh() {
   info "Bootstrapped $($bindir/gh --version 2>/dev/null | head -n1)"
 }
 
-# Prefer env token; otherwise reuse gh login; otherwise prompt for a PAT.
+read_secret() {
+  local prompt="$1" value=""
+  read -r -s -p "$prompt" value || true
+  echo >&2
+  value="${value#"${value%%[![:space:]]*}"}"
+  value="${value%"${value##*[![:space:]]}"}"
+  printf '%s' "$value"
+}
+
+# AES-256-CBC + PBKDF2 via openssl; passphrase never stored.
+encrypt_token_to_store() {
+  local token="$1" pass="$2"
+  command -v openssl >/dev/null 2>&1 || die "openssl required to encrypt the PAT store"
+  mkdir -p "$(dirname "$TOKEN_STORE_FILE")"
+  chmod 700 "$(dirname "$TOKEN_STORE_FILE")" 2>/dev/null || true
+  local tmp
+  tmp="$(mktemp)"
+  umask 077
+  if ! printf '%s' "$token" | openssl enc -aes-256-cbc -pbkdf2 -iter 200000 -salt \
+      -pass "pass:$pass" -out "$tmp" 2>/dev/null; then
+    rm -f "$tmp"
+    die "failed to encrypt PAT (openssl enc)"
+  fi
+  mv -f "$tmp" "$TOKEN_STORE_FILE"
+  chmod 600 "$TOKEN_STORE_FILE" 2>/dev/null || true
+}
+
+decrypt_token_from_store() {
+  local pass="$1" out=""
+  command -v openssl >/dev/null 2>&1 || return 1
+  [[ -r "$TOKEN_STORE_FILE" ]] || return 1
+  out="$(openssl enc -d -aes-256-cbc -pbkdf2 -iter 200000 \
+      -pass "pass:$pass" -in "$TOKEN_STORE_FILE" 2>/dev/null)" || return 1
+  [[ -n "$out" ]] || return 1
+  printf '%s' "$out"
+}
+
+prompt_and_save_encrypted_token() {
+  local token="$1" ans pass pass2
+  if ! command -v openssl >/dev/null 2>&1; then
+    echo "WARNING: openssl not found — PAT not saved (install openssl to enable)." >&2
+    return
+  fi
+  if [[ "$YES" -eq 1 ]]; then
+    if [[ -n "${ROOM_STACK_PASSPHRASE:-}" ]]; then
+      encrypt_token_to_store "$token" "$ROOM_STACK_PASSPHRASE"
+      info "Encrypted PAT saved to $TOKEN_STORE_FILE"
+    fi
+    return
+  fi
+  read -r -p "Save encrypted PAT for next runs? [Y/n]: " ans || true
+  ans="$(echo "${ans:-Y}" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')"
+  case "$ans" in
+    ""|y|yes) ;;
+    n|no) info "PAT not saved"; return ;;
+    *) die "expected y/n, got: $ans" ;;
+  esac
+  pass="$(read_secret "Create encryption passphrase: ")"
+  [[ -n "$pass" ]] || die "empty passphrase"
+  pass2="$(read_secret "Confirm passphrase: ")"
+  [[ "$pass" == "$pass2" ]] || die "passphrases do not match"
+  encrypt_token_to_store "$token" "$pass"
+  info "Encrypted PAT saved to $TOKEN_STORE_FILE"
+  echo "  Next time enter this passphrase (or set ROOM_STACK_PASSPHRASE)."
+  echo "  Forget with: $0 --forget-token"
+}
+
+load_token_from_encrypted_store() {
+  [[ -r "$TOKEN_STORE_FILE" ]] || return 1
+  local pass token
+  if [[ -n "${ROOM_STACK_PASSPHRASE:-}" ]]; then
+    pass="$ROOM_STACK_PASSPHRASE"
+  elif [[ "$YES" -eq 1 ]]; then
+    return 1
+  else
+    info "Found encrypted PAT store: $TOKEN_STORE_FILE"
+    pass="$(read_secret "Passphrase to unlock PAT: ")"
+    [[ -n "$pass" ]] || return 1
+  fi
+  token="$(decrypt_token_from_store "$pass")" || {
+    echo "WARNING: could not decrypt PAT store (wrong passphrase?)." >&2
+    return 1
+  }
+  printf '%s' "$token"
+}
+
+forget_token_store() {
+  if [[ -e "$TOKEN_STORE_FILE" ]]; then
+    rm -f "$TOKEN_STORE_FILE"
+    info "Removed encrypted PAT store: $TOKEN_STORE_FILE"
+  else
+    info "No encrypted PAT store at $TOKEN_STORE_FILE"
+  fi
+  exit 0
+}
+
+# Prefer env token; else gh login; else encrypted store; else prompt for a PAT.
 ensure_gh_auth() {
   local token=""
   if [[ -n "${GH_TOKEN:-}" ]]; then
@@ -187,8 +289,14 @@ ensure_gh_auth() {
     return
   fi
 
+  if token="$(load_token_from_encrypted_store)"; then
+    export GH_TOKEN="$token"
+    info "GitHub auth: unlocked encrypted PAT store"
+    return
+  fi
+
   if [[ "$YES" -eq 1 ]]; then
-    die "GitHub auth required. Set GH_TOKEN (or GITHUB_TOKEN / GH_TOKEN_FILE), then re-run."
+    die "GitHub auth required. Set GH_TOKEN, or create $TOKEN_STORE_FILE and set ROOM_STACK_PASSPHRASE."
   fi
 
   echo
@@ -197,20 +305,15 @@ ensure_gh_auth() {
   echo "  https://github.com/settings/tokens/new?scopes=public_repo&description=room-stack-ci-install"
   echo "  Click Generate token, copy the ghp_… value, paste below."
   echo "  (Fine-grained alternative: Actions=Read on Door/Qucs/Xschem/KLayout repos.)"
-  echo "  Token stays in this shell only (GH_TOKEN); not written to disk."
-  # -s hides input; works for PAT paste
-  read -r -s -p "Paste PAT: " token || true
-  echo
-  token="${token#"${token%%[![:space:]]*}"}"
-  token="${token%"${token##*[![:space:]]}"}"
+  token="$(read_secret "Paste PAT: ")"
   [[ -n "$token" ]] || die "empty PAT"
   export GH_TOKEN="$token"
 
-  # Best-effort persistent login for later runs (ignore keyring failures).
+  prompt_and_save_encrypted_token "$GH_TOKEN"
+
+  # Best-effort gh login for other tools (ignore keyring failures).
   if printf '%s\n' "$GH_TOKEN" | gh auth login --hostname github.com --with-token >/dev/null 2>&1; then
-    info "GitHub auth: saved via gh auth login"
-  else
-    info "GitHub auth: using GH_TOKEN for this run only"
+    info "GitHub auth: also saved via gh auth login"
   fi
 }
 
@@ -443,11 +546,28 @@ run_self_test() {
       ;;
   esac
 
+  if command -v openssl >/dev/null 2>&1; then
+    local _prev_store="$TOKEN_STORE_FILE" _round
+    TOKEN_STORE_FILE="$(mktemp)"
+    rm -f "$TOKEN_STORE_FILE"
+    encrypt_token_to_store "ghp_test_token_value" "test-pass-phrase"
+    _round="$(decrypt_token_from_store "test-pass-phrase")"
+    assert_eq "$_round" "ghp_test_token_value" "openssl token encrypt/decrypt roundtrip"
+    rm -f "$TOKEN_STORE_FILE"
+    TOKEN_STORE_FILE="$_prev_store"
+  else
+    echo "SKIP: openssl not available for token encrypt test"
+  fi
+
   bash -n "$0" || { echo "FAIL: bash -n" >&2; fail=1; }
   [[ "$fail" -eq 0 ]] || die "self-test failed"
   info "Self-test passed"
   exit 0
 }
+
+if [[ "$FORGET_TOKEN" -eq 1 ]]; then
+  forget_token_store
+fi
 
 if [[ "$SELF_TEST" -eq 1 ]]; then
   # FLAVOR unused until assertions set FLAVOR_FORCE
