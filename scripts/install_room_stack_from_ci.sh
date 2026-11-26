@@ -21,8 +21,11 @@
 #   --self-test      run offline mapping assertions and exit
 #   --from-tar FILE  install one tool from a local .tar.gz (requires --tools with one entry)
 #
-# Requires: gh (except --self-test), python3, tar.
-# PAT needs actions:read on artifact repos (classic public_repo is enough for public repos).
+# No sudo required: missing gh is downloaded into GH_BOOTSTRAP_DIR (~/.local/share/room-stack).
+# Auth: GH_TOKEN / GITHUB_TOKEN, else interactive PAT paste (classic public_repo is enough
+# for public artifact repos; needs Actions read).
+#
+# Requires: python3, tar, and curl or wget (to bootstrap gh if needed).
 set -euo pipefail
 
 YES=0
@@ -37,6 +40,8 @@ FROM_TAR=""
 WAIT_MAX_SEC="${WAIT_MAX_SEC:-3600}"
 POLL_SEC="${POLL_SEC:-30}"
 ALL_TOOLS=(door qucs xschem klayout)
+# Fallback gh release if api.github.com is rate-limited / unreachable.
+GH_VERSION_FALLBACK="${GH_VERSION_FALLBACK:-2.82.1}"
 
 REPO_DOOR="${REPO_DOOR:-IHP-GmbH/Door}"
 REPO_QUCS="${REPO_QUCS:-adatsuk/Qucs-S-roomdb}"
@@ -49,7 +54,7 @@ WORKFLOW_XSCHEM="${WORKFLOW_XSCHEM:-CI}"
 WORKFLOW_KLAYOUT="${WORKFLOW_KLAYOUT:-CI}"
 
 usage() {
-  sed -n '2,30p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '2,34p' "$0" | sed 's/^# \{0,1\}//'
   exit 0
 }
 
@@ -75,6 +80,165 @@ need() { command -v "$1" >/dev/null 2>&1 || die "missing dependency: $1"; }
 
 need python3
 need tar
+
+download_url() {
+  local url="$1" out="$2"
+  if command -v curl >/dev/null 2>&1; then
+    curl -fsSL --retry 3 --retry-delay 1 -o "$out" "$url"
+  elif command -v wget >/dev/null 2>&1; then
+    wget -q --tries=3 -O "$out" "$url"
+  else
+    die "need curl or wget to download (bootstrap gh / artifacts helpers)"
+  fi
+}
+
+gh_linux_arch() {
+  case "$(uname -m)" in
+    x86_64|amd64) echo amd64 ;;
+    aarch64|arm64) echo arm64 ;;
+    *) die "unsupported CPU for gh bootstrap: $(uname -m) (need x86_64 or aarch64)" ;;
+  esac
+}
+
+resolve_gh_version() {
+  if [[ -n "${GH_VERSION:-}" ]]; then
+    echo "${GH_VERSION#v}"
+    return
+  fi
+  local tmp ver=""
+  tmp="$(mktemp)"
+  if download_url "https://api.github.com/repos/cli/cli/releases/latest" "$tmp" 2>/dev/null; then
+    ver="$(python3 - "$tmp" <<'PY' 2>/dev/null || true
+import json, sys
+try:
+    print(json.load(open(sys.argv[1], encoding="utf-8"))["tag_name"].lstrip("v"))
+except Exception:
+    pass
+PY
+)"
+  fi
+  rm -f "$tmp"
+  if [[ -n "$ver" ]]; then
+    echo "$ver"
+  else
+    echo "$GH_VERSION_FALLBACK"
+  fi
+}
+
+# Install GitHub CLI into a user directory when system gh is missing (no sudo).
+ensure_gh() {
+  if command -v gh >/dev/null 2>&1; then
+    info "Using gh: $(command -v gh)"
+    return
+  fi
+
+  local root="${GH_BOOTSTRAP_DIR:-$HOME/.local/share/room-stack}"
+  local bindir="$root/bin"
+  mkdir -p "$bindir"
+
+  if [[ -x "$bindir/gh" ]]; then
+    export PATH="$bindir:$PATH"
+    info "Using bootstrapped gh: $bindir/gh"
+    return
+  fi
+
+  info "gh not on PATH — bootstrapping user-local copy into $bindir (no sudo)"
+  local arch ver stage tarball url gh_bin
+  arch="$(gh_linux_arch)"
+  ver="$(resolve_gh_version)"
+  stage="$root/gh-stage-$$"
+  rm -rf "$stage"
+  mkdir -p "$stage"
+  tarball="$stage/gh.tgz"
+  url="https://github.com/cli/cli/releases/download/v${ver}/gh_${ver}_linux_${arch}.tar.gz"
+  info "Downloading $url"
+  download_url "$url" "$tarball" || die "failed to download gh ${ver} (${arch})"
+  tar -xzf "$tarball" -C "$stage"
+  gh_bin="$(find "$stage" -type f -name gh | head -n1 || true)"
+  [[ -n "$gh_bin" ]] || die "gh binary missing inside release tarball"
+  cp "$gh_bin" "$bindir/gh"
+  chmod 755 "$bindir/gh"
+  rm -rf "$stage"
+  export PATH="$bindir:$PATH"
+  command -v gh >/dev/null 2>&1 || die "failed to put bootstrapped gh on PATH"
+  info "Bootstrapped $($bindir/gh --version 2>/dev/null | head -n1)"
+}
+
+# Prefer env token; otherwise reuse gh login; otherwise prompt for a PAT.
+ensure_gh_auth() {
+  local token=""
+  if [[ -n "${GH_TOKEN:-}" ]]; then
+    token="$GH_TOKEN"
+  elif [[ -n "${GITHUB_TOKEN:-}" ]]; then
+    token="$GITHUB_TOKEN"
+  elif [[ -n "${GH_TOKEN_FILE:-}" ]]; then
+    [[ -r "$GH_TOKEN_FILE" ]] || die "GH_TOKEN_FILE not readable: $GH_TOKEN_FILE"
+    token="$(tr -d '\r\n' <"$GH_TOKEN_FILE")"
+  fi
+
+  if [[ -n "$token" ]]; then
+    export GH_TOKEN="$token"
+    info "GitHub auth: using token from environment"
+    return
+  fi
+
+  if gh auth status >/dev/null 2>&1; then
+    info "GitHub auth: existing gh login OK"
+    return
+  fi
+
+  if [[ "$YES" -eq 1 ]]; then
+    die "GitHub auth required. Set GH_TOKEN (or GITHUB_TOKEN / GH_TOKEN_FILE), then re-run."
+  fi
+
+  echo
+  info "GitHub PAT required to download Actions artifacts"
+  echo "  Create at: https://github.com/settings/tokens"
+  echo "  Classic: enable public_repo (enough for public repos)"
+  echo "  Or fine-grained: Actions = Read on Door / Qucs / Xschem / KLayout repos"
+  echo "  Token is kept in this shell only (exported as GH_TOKEN); not written to disk."
+  # -s hides input; works for PAT paste
+  read -r -s -p "Paste PAT: " token || true
+  echo
+  token="${token#"${token%%[![:space:]]*}"}"
+  token="${token%"${token##*[![:space:]]}"}"
+  [[ -n "$token" ]] || die "empty PAT"
+  export GH_TOKEN="$token"
+
+  # Best-effort persistent login for later runs (ignore keyring failures).
+  if printf '%s\n' "$GH_TOKEN" | gh auth login --hostname github.com --with-token >/dev/null 2>&1; then
+    info "GitHub auth: saved via gh auth login"
+  else
+    info "GitHub auth: using GH_TOKEN for this run only"
+  fi
+}
+
+# Prefer system prefixes when writable; otherwise fall back to $HOME (no sudo).
+default_install_root() {
+  if [[ -n "${DEFAULT_ROOT:-}" ]]; then
+    echo "$DEFAULT_ROOT"
+    return
+  fi
+  if { [[ -d /usr/local/opt ]] && [[ -w /usr/local/opt ]]; } || \
+     { [[ ! -e /usr/local/opt ]] && [[ -d /usr/local ]] && [[ -w /usr/local ]]; }; then
+    echo "/usr/local/opt"
+  else
+    echo "$HOME/.local/opt"
+  fi
+}
+
+default_bin_dir() {
+  if [[ -n "${DEFAULT_BIN:-}" ]]; then
+    echo "$DEFAULT_BIN"
+    return
+  fi
+  if { [[ -d /usr/local/bin ]] && [[ -w /usr/local/bin ]]; } || \
+     { [[ ! -e /usr/local/bin ]] && [[ -d /usr/local ]] && [[ -w /usr/local ]]; }; then
+    echo "/usr/local/bin"
+  else
+    echo "$HOME/.local/bin"
+  fi
+}
 
 detect_flavor() {
   if [[ -n "$FLAVOR_FORCE" ]]; then
@@ -268,6 +432,16 @@ run_self_test() {
   parse_tools "klayout door door"
   assert_eq "${TOOLS[*]}" "klayout door" "dedupe preserves first order"
 
+  case "$(uname -m)" in
+    x86_64|amd64|aarch64|arm64)
+      _arch="$(gh_linux_arch)"
+      assert_eq "$_arch" "$_arch" "gh_linux_arch resolves ($_arch)"
+      ;;
+    *)
+      echo "SKIP: gh_linux_arch on $(uname -m)"
+      ;;
+  esac
+
   bash -n "$0" || { echo "FAIL: bash -n" >&2; fail=1; }
   [[ "$fail" -eq 0 ]] || die "self-test failed"
   info "Self-test passed"
@@ -280,7 +454,9 @@ if [[ "$SELF_TEST" -eq 1 ]]; then
   run_self_test
 fi
 
-need gh
+ensure_gh
+# --from-tar with a local file still uses gh for CI-busy checks unless dry-run exits earlier
+ensure_gh_auth
 parse_tools "$TOOLS_CSV"
 prompt_tools_selection
 FLAVOR="$(detect_flavor)"
@@ -301,8 +477,9 @@ prompt_dir() {
   fi
 }
 
-DEFAULT_ROOT="${DEFAULT_ROOT:-/usr/local/opt}"
-DEFAULT_BIN="${DEFAULT_BIN:-/usr/local/bin}"
+DEFAULT_ROOT="$(default_install_root)"
+DEFAULT_BIN="$(default_bin_dir)"
+info "Default prefixes under: $DEFAULT_ROOT (bin: $DEFAULT_BIN)"
 
 want_tool() {
   local t="$1" x
