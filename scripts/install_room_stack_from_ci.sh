@@ -60,6 +60,7 @@ REPO_QUCS="${REPO_QUCS:-adatsuk/Qucs-S-roomdb}"
 REPO_XSCHEM="${REPO_XSCHEM:-adatsuk/XSchem-roomdb}"
 REPO_KLAYOUT="${REPO_KLAYOUT:-adatsuk/KLayout-roomdb}"
 REPO_EMSTUDIO="${REPO_EMSTUDIO:-IHP-GmbH/EMStudio}"
+REPO_ROOM="${REPO_ROOM:-IHP-GmbH/Room}"
 
 WORKFLOW_DOOR="${WORKFLOW_DOOR:-Build DOOR}"
 WORKFLOW_QUCS="${WORKFLOW_QUCS:-CI}"
@@ -906,11 +907,173 @@ find_exec() {
   return 1
 }
 
+# Write a small absolute-path launcher (NOT a symlink).
+# Symlinks break *-run.sh scripts that use dirname "$0" / BASH_SOURCE (they resolve
+# to <prefix>/bin and then look for bin/bin/<tool>).
 link_into_bin() {
-  local target="$1" link_name="$2"
+  local target="$1" link_name="$2" abs
   mkdir -p "$BIN_DIR"
-  ln -sfn "$target" "$BIN_DIR/$link_name"
-  info "symlink $BIN_DIR/$link_name -> $target"
+  abs="$(readlink -f "$target" 2>/dev/null || realpath "$target" 2>/dev/null || echo "$target")"
+  [[ -e "$abs" ]] || die "launcher target missing: $target"
+  # Remove old symlink/file from previous installs.
+  rm -f "$BIN_DIR/$link_name"
+  cat >"$BIN_DIR/$link_name" <<EOF
+#!/usr/bin/env bash
+exec "$abs" "\$@"
+EOF
+  chmod +x "$BIN_DIR/$link_name"
+  info "launcher $BIN_DIR/$link_name -> $abs"
+}
+
+# Patch older *-run.sh / EMStudio wrappers that resolve DIR via dirname only.
+# Skip if they already follow symlinks (while [[ -L ... ]] + readlink).
+patch_run_script_symlink_safe() {
+  local run_sh="$1"
+  [[ -f "$run_sh" ]] || return 0
+  if grep -q 'while \[\[ -L' "$run_sh" 2>/dev/null; then
+    return 0
+  fi
+  local tmp
+  tmp="$(mktemp)"
+  python3 - "$run_sh" "$tmp" <<'PY'
+import pathlib, re, sys
+src, dst = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2])
+text = src.read_text(encoding="utf-8", errors="replace")
+repl = '''_src="${BASH_SOURCE[0]}"
+while [[ -L "$_src" ]]; do
+  _dir="$(cd -P "$(dirname "$_src")" && pwd)"
+  _src="$(readlink "$_src")"
+  [[ "$_src" != /* ]] && _src="$_dir/$_src"
+done
+DIR="$(cd -P "$(dirname "$_src")" && pwd)"'''
+patterns = [
+    # DIR="$(cd "$(dirname "$0")" && pwd)"
+    re.compile(r'^DIR="\$\(cd "\$\(dirname "\$0"\)" && pwd\)"\s*$', re.M),
+    # DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    re.compile(
+        r'^DIR="\$\(cd "\$\(dirname "\$\{BASH_SOURCE\[0\]\}"\)" && pwd\)"\s*$',
+        re.M,
+    ),
+    # DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)" with alternate quoting
+    re.compile(
+        r"^DIR=\"\$\(cd \"\$\(dirname \"\$\{BASH_SOURCE\[0\]\}\"\)\" && pwd\)\"\s*$",
+        re.M,
+    ),
+]
+new, n = text, 0
+for pat in patterns:
+    new, n = pat.subn(repl, new, count=1)
+    if n:
+        break
+if n:
+    dst.write_text(new, encoding="utf-8")
+    print(f"patched {src}")
+else:
+    dst.write_text(text, encoding="utf-8")
+PY
+  mv -f "$tmp" "$run_sh"
+  chmod +x "$run_sh"
+}
+
+# Drop Room's python package (+ room_c if available) next to door so `import room` works.
+attach_room_python() {
+  local door_prefix="$1"
+  local run_sh bundle stage tarball room_src pyroot so
+  run_sh="$(find_exec "$door_prefix" door-run.sh || true)"
+  [[ -n "$run_sh" ]] || return 0
+  bundle="$(cd "$(dirname "$run_sh")" && pwd)"
+  pyroot="$bundle/python"
+  if [[ -f "$pyroot/room/__init__.py" ]]; then
+    info "Room python already at $pyroot"
+  else
+    info "Attaching Room python package into $pyroot"
+    stage="${INSTALL_PREFIX}/lib/room-stack/.room-py-$$"
+    rm -rf "$stage"
+    mkdir -p "$stage"
+    tarball="$stage/room-src.tgz"
+    # Public source tarball — no artifact permission needed beyond normal git clone/curl.
+    download_url "https://codeload.github.com/IHP-GmbH/Room/tar.gz/refs/heads/main" "$tarball" \
+      || die "failed to download Room source (need network)"
+    tar -xzf "$tarball" -C "$stage"
+    room_src="$(find "$stage" -type d -path '*/python/room' | head -n1 || true)"
+    [[ -n "$room_src" ]] || die "Room python/room not found in source tarball"
+    mkdir -p "$pyroot"
+    rm -rf "$pyroot/room"
+    cp -a "$room_src" "$pyroot/room"
+    # Optional pure-python helpers from the same tree.
+    if [[ -d "$(dirname "$room_src")" ]]; then
+      local pdir
+      pdir="$(dirname "$room_src")"
+      for f in door_console.py setup.py pyproject.toml; do
+        [[ -f "$pdir/$f" ]] || continue
+        cp -a "$pdir/$f" "$pyroot/" 2>/dev/null || true
+      done
+    fi
+    rm -rf "$stage"
+    info "Installed $pyroot/room"
+  fi
+
+  # Best-effort: pull libroom_c.so from Room CI artifact (ubuntu build).
+  if ! find "$bundle" \( -name 'libroom_c.so' -o -name 'room_c.so' \) 2>/dev/null | grep -q .; then
+    info "Trying to fetch libroom_c.so from Room CI (room-build-ubuntu)"
+    stage="${INSTALL_PREFIX}/lib/room-stack/.room-c-$$"
+    rm -rf "$stage"
+    mkdir -p "$stage"
+    # Subshell: download_artifact calls die on failure — do not abort door install.
+    if ( download_artifact "$REPO_ROOM" "room-build-ubuntu" "$stage" ); then
+      so="$(find "$stage" -type f \( -name 'libroom_c.so' -o -name 'room_c.so' \) | head -n1 || true)"
+      if [[ -n "$so" ]]; then
+        mkdir -p "$pyroot/room" "$bundle/lib"
+        cp -a "$so" "$pyroot/room/"
+        cp -a "$so" "$bundle/lib/"
+        info "Installed room_c: $pyroot/room/$(basename "$so")"
+      else
+        echo "WARNING: room-build-ubuntu has no libroom_c.so — pure-python room only." >&2
+      fi
+    else
+      echo "WARNING: could not fetch room-build-ubuntu — import room may lack native room_c." >&2
+    fi
+    rm -rf "$stage"
+  fi
+
+  # Ensure door-run.sh exports DOOR_ROOM_PYTHON / ROOM_C_DLL when possible.
+  if [[ -f "$run_sh" ]] && ! grep -q 'DOOR_ROOM_PYTHON' "$run_sh" 2>/dev/null; then
+    local tmp
+    tmp="$(mktemp)"
+    python3 - "$run_sh" "$tmp" "$pyroot" <<'PY'
+import pathlib, sys
+src, dst, pyroot = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2]), sys.argv[3]
+text = src.read_text(encoding="utf-8", errors="replace")
+block = f'''
+# Injected by install_room_stack_from_ci.sh — Room python next to the bundle.
+if [[ -f "{pyroot}/room/__init__.py" ]]; then
+  export DOOR_ROOM_PYTHON="${{DOOR_ROOM_PYTHON:-{pyroot}}}"
+  export PYTHONPATH="{pyroot}${{PYTHONPATH:+:$PYTHONPATH}}"
+fi
+if [[ -z "${{ROOM_C_DLL:-}}" ]]; then
+  for _c in "{pyroot}/room/libroom_c.so" "{pyroot}/libroom_c.so" "$DIR/lib/libroom_c.so"; do
+    [[ -f "$_c" ]] && export ROOM_C_DLL="$_c" && break
+  done
+fi
+'''
+# Insert just before the final exec line.
+lines = text.splitlines(keepends=True)
+out = []
+injected = False
+for line in lines:
+    if (not injected) and line.lstrip().startswith("exec "):
+        out.append(block)
+        if not block.endswith("\n"):
+            out.append("\n")
+        injected = True
+    out.append(line)
+if not injected:
+    out.append(block)
+dst.write_text("".join(out), encoding="utf-8")
+PY
+    mv -f "$tmp" "$run_sh"
+    chmod +x "$run_sh"
+  fi
 }
 
 install_one() {
@@ -929,28 +1092,35 @@ install_one() {
     door)
       exe="$(find_exec "$prefix" door-run.sh door)" \
         || die "door binary not found under $prefix"
+      patch_run_script_symlink_safe "$exe"
+      attach_room_python "$prefix"
+      # Re-resolve after possible patch/attach.
+      exe="$(find_exec "$prefix" door-run.sh door)"
       link_into_bin "$exe" door
       ;;
     qucs)
       exe="$(find_exec "$prefix" qucs-s-run.sh qucs-s qucs)" \
         || die "qucs-s binary not found under $prefix"
+      patch_run_script_symlink_safe "$exe"
       link_into_bin "$exe" qucs-s
       ;;
     xschem)
       exe="$(find_exec "$prefix" xschem-run.sh xschem)" \
         || die "xschem binary not found under $prefix"
+      patch_run_script_symlink_safe "$exe"
       link_into_bin "$exe" xschem
       ;;
     klayout)
       exe="$(find_exec "$prefix" klayout-run.sh klayout)" \
         || die "klayout binary not found under $prefix"
+      patch_run_script_symlink_safe "$exe"
       link_into_bin "$exe" klayout
       ;;
     emstudio)
       exe="$(find_exec "$prefix" EMStudio emstudio)" \
         || die "EMStudio launcher/binary not found under $prefix"
+      patch_run_script_symlink_safe "$exe"
       link_into_bin "$exe" emstudio
-      # Also expose canonical capitalized name when different.
       if [[ "$(basename "$exe")" != "emstudio" ]]; then
         link_into_bin "$exe" EMStudio
       fi

@@ -106,9 +106,29 @@ done
 cat >"$DIST/door-run.sh" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
-DIR="$(cd "$(dirname "$0")" && pwd)"
+# Resolve symlinks so DIR is the real dist-bundle/ even when invoked via <prefix>/bin/door.
+_src="${BASH_SOURCE[0]}"
+while [[ -L "$_src" ]]; do
+  _dir="$(cd -P "$(dirname "$_src")" && pwd)"
+  _src="$(readlink "$_src")"
+  [[ "$_src" != /* ]] && _src="$_dir/$_src"
+done
+DIR="$(cd -P "$(dirname "$_src")" && pwd)"
 export LD_LIBRARY_PATH="$DIR/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 export QT_PLUGIN_PATH="$DIR/plugins${QT_PLUGIN_PATH:+:$QT_PLUGIN_PATH}"
+# Prefer bundled Room python next to the binary (…/dist-bundle/python/room).
+if [[ -f "$DIR/python/room/__init__.py" ]]; then
+  export DOOR_ROOM_PYTHON="${DOOR_ROOM_PYTHON:-$DIR/python}"
+  export PYTHONPATH="$DIR/python${PYTHONPATH:+:$PYTHONPATH}"
+fi
+if [[ -z "${ROOM_C_DLL:-}" ]]; then
+  for _c in "$DIR/python/room/libroom_c.so" "$DIR/python/libroom_c.so" "$DIR/lib/libroom_c.so" "$DIR/bin/libroom_c.so"; do
+    if [[ -f "$_c" ]]; then
+      export ROOM_C_DLL="$_c"
+      break
+    fi
+  done
+fi
 exec "$DIR/bin/door" "$@"
 EOF
 chmod +x "$DIST/door-run.sh"
