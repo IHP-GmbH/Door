@@ -96,6 +96,82 @@ QString resolveToolProgram(const QString &tool)
     return program;
 }
 
+/*!*******************************************************************************************************************
+ * \brief Resolve wrappers (…/bin/klayout → klayout-run.sh → dist-bundle/) to the real binary directory.
+ **********************************************************************************************************************/
+QString resolveKLayoutBundleDir(const QString &toolProgram)
+{
+    QString path = QFileInfo(toolProgram).absoluteFilePath();
+    if(path.isEmpty()) {
+        return {};
+    }
+
+    // Follow symlinks and tiny launcher scripts that `exec` the real binary.
+    for(int hop = 0; hop < 8; ++hop) {
+        const QFileInfo fi(path);
+        if(fi.isSymLink()) {
+            const QString target = fi.symLinkTarget();
+            if(target.isEmpty()) {
+                break;
+            }
+            path = QFileInfo(fi.dir(), target).absoluteFilePath();
+            continue;
+        }
+
+        if(!fi.isFile() || !fi.isReadable() || fi.size() > 65536) {
+            break;
+        }
+
+        QFile f(path);
+        if(!f.open(QIODevice::ReadOnly)) {
+            break;
+        }
+        const QByteArray head = f.read(512);
+        f.close();
+        if(!head.startsWith("#!")) {
+            break;
+        }
+
+        // Match: exec "/abs/path/klayout-run.sh" "$@"  or  exec "$DIR/klayout"
+        const QString text = QString::fromUtf8(head);
+        QRegularExpression re(QStringLiteral(R"_(exec\s+(?:\"([^\"]+)\"|'([^']+)'|(\S+)))_"));
+        const QRegularExpressionMatch m = re.match(text);
+        if(!m.hasMatch()) {
+            break;
+        }
+        QString next = m.captured(1);
+        if(next.isEmpty()) {
+            next = m.captured(2);
+        }
+        if(next.isEmpty()) {
+            next = m.captured(3);
+        }
+        next.replace(QStringLiteral("\"$@\""), QString());
+        next = next.trimmed();
+        if(next.isEmpty() || next.startsWith(QLatin1Char('$'))) {
+            // Relative/$DIR launchers: prefer sibling real klayout next to the script.
+            const QString sibling = fi.absolutePath() + QStringLiteral("/klayout");
+            if(QFileInfo::exists(sibling) && QFileInfo(sibling).isExecutable()) {
+                path = sibling;
+                break;
+            }
+            break;
+        }
+        path = QFileInfo(next).absoluteFilePath();
+    }
+
+    const QFileInfo resolved(path);
+    QString dir = resolved.absolutePath();
+    // If we landed on klayout-run.sh, the binary sits beside it.
+    if(resolved.fileName().contains(QStringLiteral("klayout-run"), Qt::CaseInsensitive)) {
+        const QString sibling = dir + QStringLiteral("/klayout");
+        if(QFileInfo::exists(sibling)) {
+            return dir;
+        }
+    }
+    return dir;
+}
+
 bool isProcessAlive(qint64 pid)
 {
     if(pid <= 0) {
@@ -128,6 +204,9 @@ QStringList discoverKLayoutLibraryDirs(const QString &toolDir)
     const QStringList candidates = {
         toolDir + QStringLiteral("/lib"),
         toolDir + QStringLiteral("/lib64"),
+        toolDir + QStringLiteral("/db_plugins"),
+        toolDir + QStringLiteral("/lay_plugins"),
+        toolDir,
     };
 
     for(const QString &candidate : candidates) {
@@ -188,6 +267,7 @@ QProcessEnvironment buildKLayoutLaunchEnvironment(const QProcessEnvironment &par
         "LC_ALL",
         "LC_CTYPE",
         "SHELL",
+        "PATH",
         "TMPDIR",
         "TMP",
         "TEMP",
@@ -197,7 +277,6 @@ QProcessEnvironment buildKLayoutLaunchEnvironment(const QProcessEnvironment &par
         "XDG_SESSION_TYPE",
         "XDG_CURRENT_DESKTOP",
 #ifdef Q_OS_WIN
-        "PATH",
         "SystemRoot",
         "WINDIR",
         "USERPROFILE",
@@ -222,7 +301,8 @@ QProcessEnvironment buildKLayoutLaunchEnvironment(const QProcessEnvironment &par
 #ifdef Q_OS_UNIX
     const QFileInfo toolFi(toolProgram);
     if(toolFi.exists()) {
-        const QString toolDir = toolFi.absolutePath();
+        // Follow …/bin/klayout wrappers into the real dist-bundle/ for libs + plugins.
+        const QString toolDir = resolveKLayoutBundleDir(toolProgram);
         const QStringList libDirs = discoverKLayoutLibraryDirs(toolDir);
         if(!libDirs.isEmpty()) {
             env.insert(QStringLiteral("LD_LIBRARY_PATH"), libDirs.join(QLatin1Char(':')));
@@ -280,7 +360,12 @@ bool launchKLayoutDetached(const QString &program,
     launcher.setProgram(program);
     launcher.setArguments(args);
     launcher.setProcessEnvironment(env);
+#ifdef Q_OS_UNIX
+    const QString bundleDir = resolveKLayoutBundleDir(program);
+    launcher.setWorkingDirectory(bundleDir.isEmpty() ? programFi.absolutePath() : bundleDir);
+#else
     launcher.setWorkingDirectory(programFi.absolutePath());
+#endif
     return launcher.startDetached(pid);
 }
 
