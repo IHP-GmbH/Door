@@ -92,6 +92,7 @@ add_executable(tst_libman_gui
     ${LIBMAN_ROOT}/src/projectcontextmenu.cpp
     ${LIBMAN_ROOT}/src/categorycontextmenu.cpp
     ${LIBMAN_ROOT}/src/about.cpp
+    ${LIBMAN_ROOT}/src/stackupdatesdialog.cpp
     ${LIBMAN_ROOT}/src/keybindings.cpp
     ${LIBMAN_ROOT}/src/keybindingsdialog.cpp
     ${LIBMAN_ROOT}/src/newview.cpp
@@ -144,6 +145,7 @@ add_executable(tst_libman_gui
     ${LIBMAN_ROOT}/src/projectmanager.ui
     ${LIBMAN_ROOT}/src/toolmanager.ui
     ${LIBMAN_ROOT}/src/about.ui
+    ${LIBMAN_ROOT}/src/stackupdatesdialog.ui
     ${LIBMAN_ROOT}/src/newview.ui
 
     ${LIBMAN_ROOT}/icons.qrc

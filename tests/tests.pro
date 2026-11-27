@@ -84,6 +84,7 @@ SOURCES += \
     $$PWD/../src/projectcontextmenu.cpp \
     $$PWD/../src/categorycontextmenu.cpp \
     $$PWD/../src/about.cpp \
+    $$PWD/../src/stackupdatesdialog.cpp \
     $$PWD/../src/python_console.cpp \
     $$PWD/../src/keybindings.cpp \
     $$PWD/../src/keybindingsdialog.cpp \
@@ -167,6 +168,7 @@ HEADERS += \
     $$PWD/../src/viewtoolstablewidget.h \
     $$PWD/../src/toolpickerdialog.h \
     $$PWD/../src/about.h \
+    $$PWD/../src/stackupdatesdialog.h \
     $$PWD/../src/python_console.h \
     $$PWD/../src/keybindings.h \
     $$PWD/../src/keybindingsdialog.h \
@@ -202,6 +204,7 @@ FORMS += \
     $$PWD/../src/exportdialog.ui \
     $$PWD/../src/toolmanager.ui \
     $$PWD/../src/about.ui \
+    $$PWD/../src/stackupdatesdialog.ui \
     $$PWD/../src/newview.ui
 
 RESOURCES += \

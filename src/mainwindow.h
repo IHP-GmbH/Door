@@ -323,6 +323,7 @@ private slots:
     void                                on_txtCellSearch_textEdited(const QString &arg1);
     void                                on_txtViewSearch_textEdited(const QString &arg1);
 
+    void                                on_actionCheckForUpdates_triggered();
     void                                on_actionAbout_triggered();
     void                                on_actionProject_triggered();
     void                                on_actionGroup_triggered();

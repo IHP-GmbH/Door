@@ -568,6 +568,28 @@ jobs:
             "installer\Door.iss" `
             /O"build\installer"
 
+      - name: Package Windows portable zip
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -x build/dist/door.exe
+          {
+            echo "flavor=windows"
+            echo "created_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            echo "source=door-windows"
+          } > build/dist/BUNDLE_SOURCE.txt
+          mkdir -p build/portable
+          # Zip contents of dist/ so unpack yields door.exe + Qt next to it.
+          (cd build/dist && zip -r -q ../portable/door-windows.zip .)
+          ls -la build/portable/door-windows.zip
+
+      - name: Upload Windows portable bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: door-windows
+          path: build/portable/door-windows.zip
+          if-no-files-found: error
+
       - name: Upload Windows installer
         uses: actions/upload-artifact@v4
         with:

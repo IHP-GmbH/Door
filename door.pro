@@ -80,6 +80,7 @@ SOURCES += \
     src/projectcontextmenu.cpp \
     src/categorycontextmenu.cpp \
     src/about.cpp \
+    src/stackupdatesdialog.cpp \
     src/keybindings.cpp \
     src/keybindingsdialog.cpp \
     src/newview.cpp \
@@ -146,6 +147,7 @@ HEADERS += \
     src/viewtoolstablewidget.h \
     src/toolpickerdialog.h \
     src/about.h \
+    src/stackupdatesdialog.h \
     src/keybindings.h \
     src/keybindingsdialog.h \
     src/newview.h \
@@ -165,6 +167,7 @@ FORMS += \
     src/exportdialog.ui \
     src/toolmanager.ui \
     src/about.ui \
+    src/stackupdatesdialog.ui \
     src/newview.ui
 
 RESOURCES += icons.qrc

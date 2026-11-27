@@ -106,6 +106,7 @@ bool watchPathsEqual(const QString &left, const QString &right)
 } // namespace
 
 #include "about.h"
+#include "stackupdatesdialog.h"
 #include "newview.h"
 #include "property.h"
 #include "view_tools.h"
@@ -1388,20 +1389,22 @@ QStringList MainWindow::layoutViewsForTool(const QString &toolName) const
 {
     const QString trimmedTool = toolName.trimmed();
     const QString key = trimmedTool + QStringLiteral("Views");
-    if(!m_properties->exists(key)) {
-        return {};
+    QStringList views;
+    if(m_properties->exists(key)) {
+        views = m_properties->get<QString>(key).remove(QLatin1Char(' ')).split(QLatin1Char(','),
+                                                                               Qt::SkipEmptyParts);
+        for(QString &view : views) {
+            view = view.trimmed().toLower();
+        }
+        views.removeAll(QString());
     }
-
-    QStringList views =
-        m_properties->get<QString>(key).remove(QLatin1Char(' ')).split(QLatin1Char(','), Qt::SkipEmptyParts);
-
-    for(QString &view : views) {
-        view = view.trimmed().toLower();
-    }
-    views.removeAll(QString());
 
     if(trimmedTool == QStringLiteral("Layout") && !views.contains(QStringLiteral("layout"))) {
         views << QStringLiteral("layout");
+    }
+    // EM tab drives emsetup even when View name(s) was left blank in Tool Manager.
+    if(trimmedTool == QStringLiteral("EM") && views.isEmpty()) {
+        views << QStringLiteral("emsetup");
     }
 
     views.sort();
@@ -2657,6 +2660,11 @@ void MainWindow::on_listViews_itemDoubleClicked(QTreeWidgetItem *item, int colum
         // Tool Manager maps view "emsetup" → EMStudio; nested items (nominal, …)
         // keep viewName = emsetup so the same tool applies.
         QString emstudio = getToolByView(QStringLiteral("emsetup"));
+        if(emstudio.isEmpty()) {
+            // View name(s) empty → still use the EM tab tool list / default row.
+            emstudio = resolveViewToolPath(loadViewTools(m_properties, QStringLiteral("EM")),
+                                           const_cast<MainWindow *>(this));
+        }
         if(emstudio.isEmpty() && m_properties->exists(QStringLiteral("EMSTUDIO"))) {
             emstudio = m_properties->get<QString>(QStringLiteral("EMSTUDIO")).trimmed();
         }
@@ -2668,6 +2676,7 @@ void MainWindow::on_listViews_itemDoubleClicked(QTreeWidgetItem *item, int colum
             }
 #endif
         }
+        emstudio = resolveToolLaunchPath(emstudio);
         if(!modelPath.isEmpty() && !emstudio.isEmpty() && QFileInfo::exists(emstudio)) {
             if(!QProcess::startDetached(emstudio, QStringList() << modelPath)) {
                 error(tr("Failed to start EMStudio:\n%1").arg(emstudio), false);
@@ -5244,6 +5253,14 @@ void MainWindow::on_txtCatSearch_textEdited(const QString &filter)
 void MainWindow::on_txtCellSearch_textEdited(const QString &filter)
 {
     hideListItem(m_ui->listGroups, filter);
+}
+
+/*!*******************************************************************************************************************
+ * \brief Opens ROOM-stack Check for updates dialog (paths from Tool Manager settings).
+ **********************************************************************************************************************/
+void MainWindow::on_actionCheckForUpdates_triggered()
+{
+    StackUpdatesDialog(m_properties, this).exec();
 }
 
 /*!*******************************************************************************************************************
