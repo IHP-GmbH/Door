@@ -24,7 +24,7 @@ jobs:
 
   build-linux-no-room:
     name: build-linux-no-room
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
 
     steps:
       - name: Checkout sources
@@ -73,7 +73,7 @@ jobs:
 
   build-linux:
     name: build-ubuntu
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     env:
       CORE_CHECKOUT_TOKEN: ${{ secrets.GH_PAT || secrets.LIBMAN_CORE_GIT_TOKEN }}
       LIBMAN_ROOM_SOURCE_DIR: ${{ github.workspace }}/.deps/Room
@@ -280,7 +280,8 @@ jobs:
   tests-linux:
     name: Tests
     needs: build-linux
-    runs-on: ubuntu-latest
+    # Pin: ubuntu-latest drifted to 26.04 and breaks jurplel/install-qt-action apt.
+    runs-on: ubuntu-24.04
     env:
       CORE_CHECKOUT_TOKEN: ${{ secrets.GH_PAT || secrets.LIBMAN_CORE_GIT_TOKEN }}
       LIBMAN_ROOM_SOURCE_DIR: ${{ github.workspace }}/.deps/Room
@@ -365,7 +366,7 @@ jobs:
   coverage-linux:
     name: Coverage (Ubuntu)
     needs: tests-linux
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     env:
       CORE_CHECKOUT_TOKEN: ${{ secrets.GH_PAT || secrets.LIBMAN_CORE_GIT_TOKEN }}
       LIBMAN_ROOM_SOURCE_DIR: ${{ github.workspace }}/.deps/Room
