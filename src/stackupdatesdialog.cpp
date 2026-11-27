@@ -6,13 +6,20 @@
 
 #include <QCoreApplication>
 #include <QDir>
+#include <QFile>
 #include <QFileInfo>
 #include <QGridLayout>
+#include <QJsonArray>
+#include <QJsonDocument>
+#include <QJsonObject>
 #include <QLabel>
 #include <QMessageBox>
+#include <QNetworkRequest>
 #include <QPushButton>
 #include <QRegularExpression>
+#include <QStandardPaths>
 #include <QTimer>
+#include <QUrl>
 
 StackUpdatesDialog::StackUpdatesDialog(Properties *properties, QWidget *parent)
     : QDialog(parent)
@@ -26,15 +33,94 @@ StackUpdatesDialog::StackUpdatesDialog(Properties *properties, QWidget *parent)
     connect(m_ui->btnUpdateAll, &QPushButton::clicked, this, &StackUpdatesDialog::onUpdateAllClicked);
     connect(&m_probe, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished), this,
             &StackUpdatesDialog::onProbeFinished);
+    connect(&m_ghToken, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished), this,
+            &StackUpdatesDialog::onGhTokenFinished);
 
     buildRows();
+    ensureGithubToken();
     QTimer::singleShot(0, this, &StackUpdatesDialog::startProbes);
 }
 
 StackUpdatesDialog::~StackUpdatesDialog()
 {
     clearProbe();
+    if (m_latestReply) {
+        m_latestReply->abort();
+        m_latestReply->deleteLater();
+        m_latestReply = nullptr;
+    }
     delete m_ui;
+}
+
+QString StackUpdatesDialog::repoForTool(const QString &toolId)
+{
+    if (toolId == QLatin1String("door")) {
+        return QStringLiteral("IHP-GmbH/Door");
+    }
+    if (toolId == QLatin1String("qucs")) {
+        return QStringLiteral("adatsuk/Qucs-S-roomdb");
+    }
+    if (toolId == QLatin1String("xschem")) {
+        return QStringLiteral("adatsuk/XSchem-roomdb");
+    }
+    if (toolId == QLatin1String("klayout")) {
+        return QStringLiteral("adatsuk/KLayout-roomdb");
+    }
+    if (toolId == QLatin1String("emstudio")) {
+        return QStringLiteral("IHP-GmbH/EMStudio");
+    }
+    if (toolId == QLatin1String("room")) {
+        return QStringLiteral("IHP-GmbH/Room");
+    }
+    return {};
+}
+
+QString StackUpdatesDialog::artifactForTool(const QString &toolId)
+{
+#ifdef Q_OS_WIN
+    if (toolId == QLatin1String("door")) {
+        return QStringLiteral("door-windows");
+    }
+    if (toolId == QLatin1String("qucs")) {
+        return QStringLiteral("qucs-s-windows");
+    }
+    if (toolId == QLatin1String("klayout")) {
+        return QStringLiteral("klayout-windows");
+    }
+    if (toolId == QLatin1String("emstudio")) {
+        return QStringLiteral("emstudio-windows");
+    }
+    if (toolId == QLatin1String("xschem")) {
+        return {}; // no native Windows portable yet
+    }
+#else
+    // Prefer Rocky 8 portable names (glibc 2.28); Door updater can refine later.
+    if (toolId == QLatin1String("door")) {
+        return QStringLiteral("door-rhel8");
+    }
+    if (toolId == QLatin1String("qucs")) {
+        return QStringLiteral("qucs-s-rocky8");
+    }
+    if (toolId == QLatin1String("xschem")) {
+        return QStringLiteral("xschem-rocky8");
+    }
+    if (toolId == QLatin1String("klayout")) {
+        return QStringLiteral("klayout-rocky8");
+    }
+    if (toolId == QLatin1String("emstudio")) {
+        return QStringLiteral("emstudio-linux-rocky8");
+    }
+#endif
+    return {};
+}
+
+QString StackUpdatesDialog::shortDate(const QString &isoUtc)
+{
+    // 2026-11-26T13:11:10Z → 2026-11-26
+    if (isoUtc.size() >= 10) {
+        return isoUtc.left(10);
+    }
+    return isoUtc;
 }
 
 void StackUpdatesDialog::buildRows()
@@ -76,6 +162,9 @@ void StackUpdatesDialog::buildRows()
         entry.id = ids.at(i);
         entry.displayName = names.at(i);
         entry.path = resolveToolPath(entry.id);
+        entry.repo = repoForTool(entry.id);
+        entry.artifactName = artifactForTool(entry.id);
+        entry.installedArtifactId = readInstalledArtifactId(entry.id, entry.path);
 
         auto *nameLbl = new QLabel(entry.displayName, this);
         entry.pathLabel = new QLabel(this);
@@ -98,7 +187,7 @@ void StackUpdatesDialog::buildRows()
         }
 
         entry.versionLabel = new QLabel(entry.path.isEmpty() ? tr("—") : tr("loading…"), this);
-        entry.latestLabel = new QLabel(tr("—"), this);
+        entry.latestLabel = new QLabel(tr("…"), this);
         entry.latestLabel->setStyleSheet(QStringLiteral("color: gray;"));
 
         entry.updateButton = new QPushButton(tr("Update"), this);
@@ -116,6 +205,46 @@ void StackUpdatesDialog::buildRows()
     }
 
     grid->setColumnStretch(1, 1);
+}
+
+QString StackUpdatesDialog::readInstalledArtifactId(const QString &toolId, const QString &path) const
+{
+    Q_UNUSED(toolId);
+    if (path.isEmpty()) {
+        return {};
+    }
+
+    QStringList candidates;
+    const QFileInfo fi(path);
+    if (fi.isDir()) {
+        candidates << QDir(path).filePath(QStringLiteral("BUNDLE_SOURCE.txt"));
+    } else {
+        const QDir dir = fi.absoluteDir();
+        candidates << dir.filePath(QStringLiteral("BUNDLE_SOURCE.txt"));
+        candidates << dir.filePath(QStringLiteral("../BUNDLE_SOURCE.txt"));
+        // Linux room-stack layout: …/lib/room-stack/<tool>/…/BUNDLE_SOURCE.txt
+        QDir climb = dir;
+        for (int i = 0; i < 5; ++i) {
+            candidates << climb.filePath(QStringLiteral("BUNDLE_SOURCE.txt"));
+            if (!climb.cdUp()) {
+                break;
+            }
+        }
+    }
+
+    for (const QString &c : candidates) {
+        QFile f(c);
+        if (!f.open(QIODevice::ReadOnly | QIODevice::Text)) {
+            continue;
+        }
+        while (!f.atEnd()) {
+            const QByteArray line = f.readLine().trimmed();
+            if (line.startsWith("artifact_id=")) {
+                return QString::fromUtf8(line.mid(12)).trimmed();
+            }
+        }
+    }
+    return {};
 }
 
 QString StackUpdatesDialog::resolveToolPath(const QString &toolId) const
@@ -148,7 +277,6 @@ QString StackUpdatesDialog::resolveToolPath(const QString &toolId) const
                 return p;
             }
         }
-        // Fallback: legacy Schematic path if it matches the tool name.
         if (m_properties->exists(QStringLiteral("Schematic"))) {
             const QString p =
                 resolveToolLaunchPath(m_properties->get<QString>(QStringLiteral("Schematic")));
@@ -194,7 +322,6 @@ QString StackUpdatesDialog::probeProgram(const QString &path) const
     if (path.isEmpty()) {
         return {};
     }
-    // Layout tool may be: "klayout.exe" -e  or quoted path with args.
     QString trimmed = path.trimmed();
     if (trimmed.startsWith(QLatin1Char('"'))) {
         const int end = trimmed.indexOf(QLatin1Char('"'), 1);
@@ -215,6 +342,46 @@ void StackUpdatesDialog::clearProbe()
     m_probeIndex = -1;
 }
 
+void StackUpdatesDialog::ensureGithubToken()
+{
+    m_githubToken = qEnvironmentVariable("GH_TOKEN").trimmed();
+    if (m_githubToken.isEmpty()) {
+        m_githubToken = qEnvironmentVariable("GITHUB_TOKEN").trimmed();
+    }
+    if (!m_githubToken.isEmpty()) {
+        m_tokenReady = true;
+        return;
+    }
+
+    const QString gh = QStandardPaths::findExecutable(QStringLiteral("gh"));
+    if (gh.isEmpty()) {
+        m_tokenReady = true; // proceed unauthenticated (may 401 on private repos)
+        return;
+    }
+    m_ghToken.setProgram(gh);
+    m_ghToken.setArguments({QStringLiteral("auth"), QStringLiteral("token")});
+    m_ghToken.start();
+}
+
+void StackUpdatesDialog::onGhTokenFinished(int exitCode, QProcess::ExitStatus status)
+{
+    if (status == QProcess::NormalExit && exitCode == 0) {
+        m_githubToken = QString::fromUtf8(m_ghToken.readAllStandardOutput()).trimmed();
+    }
+    m_tokenReady = true;
+    // If probes already finished, kick latest checks now.
+    bool anyProbe = false;
+    for (const ToolRow &r : m_rows) {
+        if (r.probePending) {
+            anyProbe = true;
+            break;
+        }
+    }
+    if (!anyProbe) {
+        startLatestChecks();
+    }
+}
+
 void StackUpdatesDialog::startProbes()
 {
     clearProbe();
@@ -225,12 +392,13 @@ void StackUpdatesDialog::startProbes()
         } else if (m_rows[i].id == QStringLiteral("room")) {
             const QFileInfo fi(m_rows[i].path);
             setVersionText(i, fi.exists() ? tr("present") : tr("missing"));
-            m_rows[i].latestLabel->setText(tr("—"));
             m_rows[i].probePending = false;
         } else {
             m_rows[i].probePending = true;
             setVersionText(i, tr("loading…"));
         }
+        setLatestText(i, tr("…"));
+        m_rows[i].latestPending = true;
     }
     runNextProbe();
 }
@@ -245,6 +413,9 @@ void StackUpdatesDialog::runNextProbe()
         }
     }
     if (m_probeIndex < 0) {
+        if (m_tokenReady) {
+            startLatestChecks();
+        }
         return;
     }
 
@@ -261,7 +432,6 @@ void StackUpdatesDialog::runNextProbe()
     m_probe.setWorkingDirectory(QFileInfo(prog).absolutePath());
     m_probe.start();
     if (!m_probe.waitForStarted(2000)) {
-        // Some tools only accept -v
         m_probe.setArguments({QStringLiteral("-v")});
         m_probe.start();
         if (!m_probe.waitForStarted(2000)) {
@@ -283,7 +453,6 @@ void StackUpdatesDialog::onProbeFinished(int exitCode, QProcess::ExitStatus stat
 
     const QByteArray out = m_probe.readAllStandardOutput() + m_probe.readAllStandardError();
     if (status != QProcess::NormalExit && out.isEmpty()) {
-        // Retry once with -v if --version failed silently
         if (m_probe.arguments().value(0) == QStringLiteral("--version")) {
             m_rows[idx].probePending = true;
             m_probe.setArguments({QStringLiteral("-v")});
@@ -298,8 +467,201 @@ void StackUpdatesDialog::onProbeFinished(int exitCode, QProcess::ExitStatus stat
         const QString ver = extractVersion(out);
         setVersionText(idx, ver.isEmpty() ? tr("installed") : ver);
     }
-    m_rows[idx].latestLabel->setText(tr("—"));
     runNextProbe();
+}
+
+void StackUpdatesDialog::startLatestChecks()
+{
+    m_latestIndex = -1;
+    for (int i = 0; i < m_rows.size(); ++i) {
+        m_rows[i].latestPending = true;
+        setLatestText(i, tr("checking…"));
+    }
+    runNextLatest();
+}
+
+void StackUpdatesDialog::runNextLatest()
+{
+    m_latestIndex = -1;
+    for (int i = 0; i < m_rows.size(); ++i) {
+        if (m_rows[i].latestPending) {
+            m_latestIndex = i;
+            break;
+        }
+    }
+    if (m_latestIndex < 0) {
+        m_ui->lblStatus->setText(
+            tr("Latest = newest non-expired GitHub Actions artifact (or Room HEAD). "
+               "Update download is not wired yet."));
+        return;
+    }
+
+    ToolRow &row = m_rows[m_latestIndex];
+#ifdef Q_OS_WIN
+    if (row.id == QStringLiteral("xschem")) {
+        applyLatestResult(m_latestIndex, {}, {}, tr("no Windows artifact (use WSL)"));
+        return;
+    }
+#endif
+    if (row.id == QStringLiteral("room")) {
+        requestRoomLatest(m_latestIndex);
+        return;
+    }
+    if (row.artifactName.isEmpty() || row.repo.isEmpty()) {
+        applyLatestResult(m_latestIndex, {}, {}, tr("no CI artifact mapping"));
+        return;
+    }
+    requestArtifactLatest(m_latestIndex);
+}
+
+void StackUpdatesDialog::requestArtifactLatest(int index)
+{
+    const ToolRow &row = m_rows.at(index);
+    const QUrl url(QStringLiteral("https://api.github.com/repos/%1/actions/artifacts?name=%2&per_page=20")
+                       .arg(row.repo, row.artifactName));
+    QNetworkRequest req(url);
+    req.setRawHeader("Accept", "application/vnd.github+json");
+    req.setRawHeader("User-Agent", "Door-StackUpdates/1.0");
+    if (!m_githubToken.isEmpty()) {
+        req.setRawHeader("Authorization", QByteArray("Bearer ") + m_githubToken.toUtf8());
+    }
+    if (m_latestReply) {
+        m_latestReply->abort();
+        m_latestReply->deleteLater();
+    }
+    m_latestReply = m_nam.get(req);
+    connect(m_latestReply, &QNetworkReply::finished, this, &StackUpdatesDialog::onLatestFinished);
+}
+
+void StackUpdatesDialog::requestRoomLatest(int index)
+{
+    Q_UNUSED(index);
+    const QUrl url(QStringLiteral("https://api.github.com/repos/IHP-GmbH/Room/commits?per_page=1"));
+    QNetworkRequest req(url);
+    req.setRawHeader("Accept", "application/vnd.github+json");
+    req.setRawHeader("User-Agent", "Door-StackUpdates/1.0");
+    if (!m_githubToken.isEmpty()) {
+        req.setRawHeader("Authorization", QByteArray("Bearer ") + m_githubToken.toUtf8());
+    }
+    if (m_latestReply) {
+        m_latestReply->abort();
+        m_latestReply->deleteLater();
+    }
+    m_latestReply = m_nam.get(req);
+    connect(m_latestReply, &QNetworkReply::finished, this, &StackUpdatesDialog::onLatestFinished);
+}
+
+void StackUpdatesDialog::onLatestFinished()
+{
+    QNetworkReply *reply = m_latestReply;
+    m_latestReply = nullptr;
+    if (!reply) {
+        return;
+    }
+    reply->deleteLater();
+
+    const int idx = m_latestIndex;
+    if (idx < 0 || idx >= m_rows.size()) {
+        return;
+    }
+
+    const int status = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+    const QByteArray body = reply->readAll();
+    if (reply->error() != QNetworkReply::NoError || status >= 400) {
+        QString err = reply->errorString();
+        if (status == 401 || status == 403) {
+            err = tr("GitHub auth required (set GH_TOKEN or run: gh auth login)");
+        } else if (status > 0) {
+            err = tr("HTTP %1").arg(status);
+        }
+        applyLatestResult(idx, {}, {}, err);
+        return;
+    }
+
+    const QJsonDocument doc = QJsonDocument::fromJson(body);
+    if (m_rows[idx].id == QStringLiteral("room")) {
+        QString sha;
+        QString date;
+        if (doc.isArray() && !doc.array().isEmpty()) {
+            const QJsonObject o = doc.array().at(0).toObject();
+            sha = o.value(QStringLiteral("sha")).toString().left(7);
+            date = o.value(QStringLiteral("commit"))
+                       .toObject()
+                       .value(QStringLiteral("committer"))
+                       .toObject()
+                       .value(QStringLiteral("date"))
+                       .toString();
+        }
+        if (sha.isEmpty()) {
+            applyLatestResult(idx, {}, {}, tr("no commits"));
+        } else {
+            applyLatestResult(idx, sha, date, {});
+        }
+        return;
+    }
+
+    QString artId;
+    QString created;
+    if (doc.isObject()) {
+        const QJsonArray arts = doc.object().value(QStringLiteral("artifacts")).toArray();
+        for (const QJsonValue &v : arts) {
+            const QJsonObject a = v.toObject();
+            if (a.value(QStringLiteral("expired")).toBool()) {
+                continue;
+            }
+            artId = QString::number(a.value(QStringLiteral("id")).toVariant().toLongLong());
+            created = a.value(QStringLiteral("created_at")).toString();
+            if (!artId.isEmpty()) {
+                break;
+            }
+        }
+    }
+    if (artId.isEmpty()) {
+        applyLatestResult(idx, {}, {}, tr("no artifact yet (%1)").arg(m_rows[idx].artifactName));
+        return;
+    }
+    applyLatestResult(idx, artId, created, {});
+}
+
+void StackUpdatesDialog::applyLatestResult(int index, const QString &artifactId,
+                                           const QString &createdAt, const QString &error)
+{
+    if (index < 0 || index >= m_rows.size()) {
+        return;
+    }
+    m_rows[index].latestPending = false;
+
+    if (!error.isEmpty()) {
+        setLatestText(index, tr("—"), error);
+        runNextLatest();
+        return;
+    }
+
+    const QString date = shortDate(createdAt);
+    QString text;
+    QString tip;
+
+    if (m_rows[index].id == QStringLiteral("room")) {
+        text = artifactId; // short SHA
+        if (!date.isEmpty()) {
+            text += QStringLiteral(" (%1)").arg(date);
+        }
+        tip = tr("Room HEAD on GitHub");
+    } else if (!m_rows[index].installedArtifactId.isEmpty()
+               && m_rows[index].installedArtifactId == artifactId) {
+        text = date.isEmpty() ? tr("up to date") : tr("%1 (up to date)").arg(date);
+        tip = tr("artifact_id=%1").arg(artifactId);
+    } else if (!m_rows[index].installedArtifactId.isEmpty()) {
+        text = date.isEmpty() ? tr("update available") : tr("%1 (newer)").arg(date);
+        tip = tr("installed artifact_id=%1 → latest=%2")
+                  .arg(m_rows[index].installedArtifactId, artifactId);
+    } else {
+        text = date.isEmpty() ? artifactId : date;
+        tip = tr("CI artifact %1 (id=%2)").arg(m_rows[index].artifactName, artifactId);
+    }
+
+    setLatestText(index, text, tip);
+    runNextLatest();
 }
 
 QString StackUpdatesDialog::extractVersion(const QByteArray &raw)
@@ -319,10 +681,30 @@ void StackUpdatesDialog::setVersionText(int index, const QString &text)
     m_rows[index].versionLabel->setText(text);
 }
 
+void StackUpdatesDialog::setLatestText(int index, const QString &text, const QString &tooltip)
+{
+    if (index < 0 || index >= m_rows.size() || !m_rows[index].latestLabel) {
+        return;
+    }
+    m_rows[index].latestLabel->setText(text);
+    m_rows[index].latestLabel->setToolTip(tooltip);
+    m_rows[index].latestLabel->setStyleSheet(
+        text.contains(QStringLiteral("newer")) || text.contains(QStringLiteral("update available"))
+            ? QStringLiteral("color: #a60;")
+            : (text.contains(QStringLiteral("up to date")) ? QStringLiteral("color: green;")
+                                                           : QStringLiteral("color: gray;")));
+}
+
 void StackUpdatesDialog::onRefreshClicked()
 {
+    if (m_latestReply) {
+        m_latestReply->abort();
+        m_latestReply->deleteLater();
+        m_latestReply = nullptr;
+    }
     for (int i = 0; i < m_rows.size(); ++i) {
         m_rows[i].path = resolveToolPath(m_rows[i].id);
+        m_rows[i].installedArtifactId = readInstalledArtifactId(m_rows[i].id, m_rows[i].path);
         if (m_rows[i].pathLabel) {
             if (m_rows[i].path.isEmpty()) {
                 m_rows[i].pathLabel->setText(tr("(not set)"));
@@ -340,7 +722,7 @@ void StackUpdatesDialog::onUpdateAllClicked()
         this, tr("Check for updates"),
         tr("CI download/install is not implemented yet.\n"
            "On Linux use install_room_stack_from_ci.sh --update.\n"
-           "Windows portable artifacts are being added as *-windows zips."));
+           "Latest column already queries GitHub Actions artifacts."));
 }
 
 void StackUpdatesDialog::onRowUpdateClicked()
