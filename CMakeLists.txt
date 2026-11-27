@@ -381,7 +381,7 @@ target_link_libraries(door PRIVATE
 )
 
 if(WIN32)
-    target_link_libraries(door PRIVATE crypt32)
+    target_link_libraries(door PRIVATE crypt32 ole32 uuid)
 endif()
 
 # CML driver next to the binary (python/door_console.py).

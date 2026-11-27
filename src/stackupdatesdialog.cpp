@@ -15,8 +15,10 @@
 #include <QLabel>
 #include <QMessageBox>
 #include <QNetworkRequest>
+#include <QProcessEnvironment>
 #include <QPushButton>
 #include <QRegularExpression>
+#include <QSslSocket>
 #include <QStandardPaths>
 #include <QTimer>
 #include <QUrl>
@@ -35,8 +37,28 @@ StackUpdatesDialog::StackUpdatesDialog(Properties *properties, QWidget *parent)
             &StackUpdatesDialog::onProbeFinished);
     connect(&m_ghToken, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished), this,
             &StackUpdatesDialog::onGhTokenFinished);
+    connect(&m_ghApi, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished), this,
+            &StackUpdatesDialog::onGhApiFinished);
+
+    m_ghExe = QStandardPaths::findExecutable(QStringLiteral("gh"));
+    if (m_ghExe.isEmpty()) {
+        // GUI apps often miss the user PATH that shells have.
+        const QStringList candidates = {
+            QDir(QString::fromLocal8Bit(qgetenv("LOCALAPPDATA")))
+                .filePath(QStringLiteral("GitHub CLI/gh.exe")),
+            QStringLiteral("C:/Program Files/GitHub CLI/gh.exe"),
+            QStringLiteral("C:/Program Files (x86)/GitHub CLI/gh.exe"),
+        };
+        for (const QString &c : candidates) {
+            if (QFileInfo::exists(c)) {
+                m_ghExe = c;
+                break;
+            }
+        }
+    }
 
     buildRows();
+    refreshUpdateAllEnabled();
     ensureGithubToken();
     QTimer::singleShot(0, this, &StackUpdatesDialog::startProbes);
 }
@@ -44,6 +66,10 @@ StackUpdatesDialog::StackUpdatesDialog(Properties *properties, QWidget *parent)
 StackUpdatesDialog::~StackUpdatesDialog()
 {
     clearProbe();
+    if (m_ghApi.state() != QProcess::NotRunning) {
+        m_ghApi.kill();
+        m_ghApi.waitForFinished(500);
+    }
     if (m_latestReply) {
         m_latestReply->abort();
         m_latestReply->deleteLater();
@@ -72,6 +98,22 @@ QString StackUpdatesDialog::repoForTool(const QString &toolId)
     if (toolId == QLatin1String("room")) {
         return QStringLiteral("IHP-GmbH/Room");
     }
+    return {};
+}
+
+QString StackUpdatesDialog::artifactFallbackForTool(const QString &toolId)
+{
+#ifdef Q_OS_WIN
+    // Portable zip may not exist yet on CI; installer artifact still proves Latest works.
+    if (toolId == QLatin1String("door")) {
+        return QStringLiteral("door-windows-installer");
+    }
+    if (toolId == QLatin1String("emstudio")) {
+        return QStringLiteral("emstudio-windows-installer");
+    }
+#else
+    Q_UNUSED(toolId);
+#endif
     return {};
 }
 
@@ -192,7 +234,8 @@ void StackUpdatesDialog::buildRows()
 
         entry.updateButton = new QPushButton(tr("Update"), this);
         entry.updateButton->setProperty("toolIndex", i);
-        entry.updateButton->setToolTip(tr("Download/install from CI is not wired yet."));
+        entry.updateButton->setEnabled(false);
+        entry.updateButton->setToolTip(tr("Checking for updates…"));
         connect(entry.updateButton, &QPushButton::clicked, this, &StackUpdatesDialog::onRowUpdateClicked);
 
         grid->addWidget(nameLbl, row, 0);
@@ -205,6 +248,27 @@ void StackUpdatesDialog::buildRows()
     }
 
     grid->setColumnStretch(1, 1);
+}
+
+QString StackUpdatesDialog::readLocalGitShortSha(const QString &repoPath) const
+{
+    if (repoPath.isEmpty()) {
+        return {};
+    }
+    QFile head(QDir(repoPath).filePath(QStringLiteral(".git/HEAD")));
+    if (!head.open(QIODevice::ReadOnly | QIODevice::Text)) {
+        return {};
+    }
+    const QByteArray line = head.readLine().trimmed();
+    head.close();
+    if (line.startsWith("ref: ")) {
+        QFile ref(QDir(repoPath).filePath(QStringLiteral(".git/") + QString::fromUtf8(line.mid(5))));
+        if (!ref.open(QIODevice::ReadOnly | QIODevice::Text)) {
+            return {};
+        }
+        return QString::fromUtf8(ref.readLine().trimmed()).left(7);
+    }
+    return QString::fromUtf8(line).left(7);
 }
 
 QString StackUpdatesDialog::readInstalledArtifactId(const QString &toolId, const QString &path) const
@@ -344,7 +408,13 @@ void StackUpdatesDialog::clearProbe()
 
 void StackUpdatesDialog::ensureGithubToken()
 {
-    m_githubToken = qEnvironmentVariable("GH_TOKEN").trimmed();
+    // Prefer Settings → Tools → GitHub → GH_TOKEN (DPAPI at rest).
+    if (m_properties && m_properties->exists(QStringLiteral("GH_TOKEN"))) {
+        m_githubToken = m_properties->get<QString>(QStringLiteral("GH_TOKEN")).trimmed();
+    }
+    if (m_githubToken.isEmpty()) {
+        m_githubToken = qEnvironmentVariable("GH_TOKEN").trimmed();
+    }
     if (m_githubToken.isEmpty()) {
         m_githubToken = qEnvironmentVariable("GITHUB_TOKEN").trimmed();
     }
@@ -475,8 +545,11 @@ void StackUpdatesDialog::startLatestChecks()
     m_latestIndex = -1;
     for (int i = 0; i < m_rows.size(); ++i) {
         m_rows[i].latestPending = true;
+        m_rows[i].triedFallbackArtifact = false;
         setLatestText(i, tr("checking…"));
+        setUpdateEnabled(i, false, tr("Checking for updates…"));
     }
+    refreshUpdateAllEnabled();
     runNextLatest();
 }
 
@@ -514,11 +587,29 @@ void StackUpdatesDialog::runNextLatest()
     requestArtifactLatest(m_latestIndex);
 }
 
-void StackUpdatesDialog::requestArtifactLatest(int index)
+bool StackUpdatesDialog::startGhApi(const QString &endpoint)
 {
-    const ToolRow &row = m_rows.at(index);
-    const QUrl url(QStringLiteral("https://api.github.com/repos/%1/actions/artifacts?name=%2&per_page=20")
-                       .arg(row.repo, row.artifactName));
+    if (m_ghExe.isEmpty()) {
+        return false;
+    }
+    if (m_ghApi.state() != QProcess::NotRunning) {
+        m_ghApi.kill();
+        m_ghApi.waitForFinished(500);
+    }
+    QProcessEnvironment env = QProcessEnvironment::systemEnvironment();
+    if (!m_githubToken.isEmpty()) {
+        env.insert(QStringLiteral("GH_TOKEN"), m_githubToken);
+        env.insert(QStringLiteral("GITHUB_TOKEN"), m_githubToken);
+    }
+    m_ghApi.setProcessEnvironment(env);
+    m_ghApi.setProgram(m_ghExe);
+    m_ghApi.setArguments({QStringLiteral("api"), endpoint});
+    m_ghApi.start();
+    return true;
+}
+
+void StackUpdatesDialog::startNetworkGet(const QUrl &url)
+{
     QNetworkRequest req(url);
     req.setRawHeader("Accept", "application/vnd.github+json");
     req.setRawHeader("User-Agent", "Door-StackUpdates/1.0");
@@ -533,22 +624,58 @@ void StackUpdatesDialog::requestArtifactLatest(int index)
     connect(m_latestReply, &QNetworkReply::finished, this, &StackUpdatesDialog::onLatestFinished);
 }
 
+void StackUpdatesDialog::requestArtifactLatest(int index)
+{
+    const ToolRow &row = m_rows.at(index);
+    m_latestIsRoom = false;
+    const QString endpoint =
+        QStringLiteral("repos/%1/actions/artifacts?name=%2&per_page=20")
+            .arg(row.repo, row.artifactName);
+    if (startGhApi(endpoint)) {
+        return;
+    }
+    if (!QSslSocket::supportsSsl()) {
+        applyLatestResult(index, {}, {},
+                          tr("no TLS (install OpenSSL next to door.exe, or add gh to PATH)"));
+        return;
+    }
+    startNetworkGet(QUrl(QStringLiteral("https://api.github.com/%1").arg(endpoint)));
+}
+
 void StackUpdatesDialog::requestRoomLatest(int index)
 {
     Q_UNUSED(index);
-    const QUrl url(QStringLiteral("https://api.github.com/repos/IHP-GmbH/Room/commits?per_page=1"));
-    QNetworkRequest req(url);
-    req.setRawHeader("Accept", "application/vnd.github+json");
-    req.setRawHeader("User-Agent", "Door-StackUpdates/1.0");
-    if (!m_githubToken.isEmpty()) {
-        req.setRawHeader("Authorization", QByteArray("Bearer ") + m_githubToken.toUtf8());
+    m_latestIsRoom = true;
+    const QString endpoint = QStringLiteral("repos/IHP-GmbH/Room/commits?per_page=1");
+    if (startGhApi(endpoint)) {
+        return;
     }
-    if (m_latestReply) {
-        m_latestReply->abort();
-        m_latestReply->deleteLater();
+    if (!QSslSocket::supportsSsl()) {
+        applyLatestResult(index, {}, {},
+                          tr("no TLS (install OpenSSL next to door.exe, or add gh to PATH)"));
+        return;
     }
-    m_latestReply = m_nam.get(req);
-    connect(m_latestReply, &QNetworkReply::finished, this, &StackUpdatesDialog::onLatestFinished);
+    startNetworkGet(QUrl(QStringLiteral("https://api.github.com/%1").arg(endpoint)));
+}
+
+void StackUpdatesDialog::onGhApiFinished(int exitCode, QProcess::ExitStatus status)
+{
+    const QByteArray body = m_ghApi.readAllStandardOutput();
+    const QByteArray errOut = m_ghApi.readAllStandardError();
+    if (status != QProcess::NormalExit || exitCode != 0) {
+        QString err = QString::fromUtf8(errOut).trimmed();
+        if (err.isEmpty()) {
+            err = tr("gh api failed (exit %1)").arg(exitCode);
+        }
+        // Keep message short for the Latest cell.
+        const int nl = err.indexOf(QLatin1Char('\n'));
+        if (nl > 0) {
+            err = err.left(nl).trimmed();
+        }
+        handleLatestPayload({}, 400, err);
+        return;
+    }
+    handleLatestPayload(body, 200, {});
 }
 
 void StackUpdatesDialog::onLatestFinished()
@@ -560,26 +687,36 @@ void StackUpdatesDialog::onLatestFinished()
     }
     reply->deleteLater();
 
+    const int status = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+    const QByteArray body = reply->readAll();
+    QString netError;
+    if (reply->error() != QNetworkReply::NoError || status >= 400) {
+        netError = reply->errorString();
+        if (status == 401 || status == 403) {
+            netError = tr("GitHub auth required (Settings → Tools → GitHub → GH_TOKEN)");
+        } else if (status > 0) {
+            netError = tr("HTTP %1").arg(status);
+        }
+    }
+    handleLatestPayload(body, status, netError);
+}
+
+void StackUpdatesDialog::handleLatestPayload(const QByteArray &body, int httpStatus,
+                                             const QString &netError)
+{
     const int idx = m_latestIndex;
     if (idx < 0 || idx >= m_rows.size()) {
         return;
     }
 
-    const int status = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
-    const QByteArray body = reply->readAll();
-    if (reply->error() != QNetworkReply::NoError || status >= 400) {
-        QString err = reply->errorString();
-        if (status == 401 || status == 403) {
-            err = tr("GitHub auth required (set GH_TOKEN or run: gh auth login)");
-        } else if (status > 0) {
-            err = tr("HTTP %1").arg(status);
-        }
-        applyLatestResult(idx, {}, {}, err);
+    if (!netError.isEmpty() || httpStatus >= 400) {
+        applyLatestResult(idx, {}, {},
+                          netError.isEmpty() ? tr("HTTP %1").arg(httpStatus) : netError);
         return;
     }
 
     const QJsonDocument doc = QJsonDocument::fromJson(body);
-    if (m_rows[idx].id == QStringLiteral("room")) {
+    if (m_latestIsRoom || m_rows[idx].id == QStringLiteral("room")) {
         QString sha;
         QString date;
         if (doc.isArray() && !doc.array().isEmpty()) {
@@ -617,6 +754,13 @@ void StackUpdatesDialog::onLatestFinished()
         }
     }
     if (artId.isEmpty()) {
+        const QString fallback = artifactFallbackForTool(m_rows[idx].id);
+        if (!fallback.isEmpty() && !m_rows[idx].triedFallbackArtifact) {
+            m_rows[idx].triedFallbackArtifact = true;
+            m_rows[idx].artifactName = fallback;
+            requestArtifactLatest(idx);
+            return;
+        }
         applyLatestResult(idx, {}, {}, tr("no artifact yet (%1)").arg(m_rows[idx].artifactName));
         return;
     }
@@ -632,7 +776,10 @@ void StackUpdatesDialog::applyLatestResult(int index, const QString &artifactId,
     m_rows[index].latestPending = false;
 
     if (!error.isEmpty()) {
-        setLatestText(index, tr("—"), error);
+        // Show the reason in-cell (was only a tooltip "—", which looked like a blank failure).
+        setLatestText(index, error, error);
+        setUpdateEnabled(index, false, error);
+        refreshUpdateAllEnabled();
         runNextLatest();
         return;
     }
@@ -640,27 +787,54 @@ void StackUpdatesDialog::applyLatestResult(int index, const QString &artifactId,
     const QString date = shortDate(createdAt);
     QString text;
     QString tip;
+    bool upToDate = false;
+    bool updateAvailable = false;
 
     if (m_rows[index].id == QStringLiteral("room")) {
+        const QString localSha = readLocalGitShortSha(m_rows[index].path);
         text = artifactId; // short SHA
         if (!date.isEmpty()) {
             text += QStringLiteral(" (%1)").arg(date);
         }
-        tip = tr("Room HEAD on GitHub");
+        if (!localSha.isEmpty() && localSha == artifactId) {
+            text += QStringLiteral(" · ") + tr("up to date");
+            tip = tr("Local Room matches GitHub HEAD (%1)").arg(artifactId);
+            upToDate = true;
+        } else if (!localSha.isEmpty()) {
+            text += QStringLiteral(" · ") + tr("newer");
+            tip = tr("Local %1 → GitHub %2").arg(localSha, artifactId);
+            updateAvailable = true;
+        } else {
+            tip = tr("Room HEAD on GitHub");
+            updateAvailable = !artifactId.isEmpty();
+        }
     } else if (!m_rows[index].installedArtifactId.isEmpty()
                && m_rows[index].installedArtifactId == artifactId) {
         text = date.isEmpty() ? tr("up to date") : tr("%1 (up to date)").arg(date);
         tip = tr("artifact_id=%1").arg(artifactId);
+        upToDate = true;
     } else if (!m_rows[index].installedArtifactId.isEmpty()) {
         text = date.isEmpty() ? tr("update available") : tr("%1 (newer)").arg(date);
         tip = tr("installed artifact_id=%1 → latest=%2")
                   .arg(m_rows[index].installedArtifactId, artifactId);
+        updateAvailable = true;
     } else {
         text = date.isEmpty() ? artifactId : date;
         tip = tr("CI artifact %1 (id=%2)").arg(m_rows[index].artifactName, artifactId);
+        // No BUNDLE_SOURCE.txt — cannot prove installed == latest; keep Update enabled.
+        updateAvailable = !artifactId.isEmpty();
     }
 
     setLatestText(index, text, tip);
+    if (upToDate) {
+        setUpdateEnabled(index, false, tr("Already on the latest CI build."));
+    } else if (updateAvailable) {
+        setUpdateEnabled(index, true,
+                         tr("Download/install from CI is not wired yet."));
+    } else {
+        setUpdateEnabled(index, false, tip);
+    }
+    refreshUpdateAllEnabled();
     runNextLatest();
 }
 
@@ -695,8 +869,40 @@ void StackUpdatesDialog::setLatestText(int index, const QString &text, const QSt
                                                            : QStringLiteral("color: gray;")));
 }
 
+void StackUpdatesDialog::setUpdateEnabled(int index, bool enabled, const QString &tooltip)
+{
+    if (index < 0 || index >= m_rows.size() || !m_rows[index].updateButton) {
+        return;
+    }
+    m_rows[index].updateButton->setEnabled(enabled);
+    if (!tooltip.isEmpty()) {
+        m_rows[index].updateButton->setToolTip(tooltip);
+    }
+}
+
+void StackUpdatesDialog::refreshUpdateAllEnabled()
+{
+    bool any = false;
+    for (const ToolRow &r : m_rows) {
+        if (r.updateButton && r.updateButton->isEnabled()) {
+            any = true;
+            break;
+        }
+    }
+    if (m_ui && m_ui->btnUpdateAll) {
+        m_ui->btnUpdateAll->setEnabled(any);
+        m_ui->btnUpdateAll->setToolTip(
+            any ? tr("Download/install from CI is not wired yet.")
+                : tr("All listed tools are up to date or have no update available."));
+    }
+}
+
 void StackUpdatesDialog::onRefreshClicked()
 {
+    if (m_ghApi.state() != QProcess::NotRunning) {
+        m_ghApi.kill();
+        m_ghApi.waitForFinished(500);
+    }
     if (m_latestReply) {
         m_latestReply->abort();
         m_latestReply->deleteLater();
@@ -704,7 +910,9 @@ void StackUpdatesDialog::onRefreshClicked()
     }
     for (int i = 0; i < m_rows.size(); ++i) {
         m_rows[i].path = resolveToolPath(m_rows[i].id);
+        m_rows[i].artifactName = artifactForTool(m_rows[i].id);
         m_rows[i].installedArtifactId = readInstalledArtifactId(m_rows[i].id, m_rows[i].path);
+        m_rows[i].triedFallbackArtifact = false;
         if (m_rows[i].pathLabel) {
             if (m_rows[i].path.isEmpty()) {
                 m_rows[i].pathLabel->setText(tr("(not set)"));
@@ -713,6 +921,7 @@ void StackUpdatesDialog::onRefreshClicked()
             }
         }
     }
+    ensureGithubToken();
     startProbes();
 }
 

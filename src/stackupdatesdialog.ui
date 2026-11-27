@@ -57,7 +57,7 @@
    <item>
     <widget class="QLabel" name="lblStatus">
      <property name="text">
-      <string>Updater backend coming next. Windows portable CI artifacts: door-windows, emstudio-windows, qucs-s-windows, klayout-windows.</string>
+      <string>Latest uses GitHub Actions artifacts (token: Settings → Tools → GitHub → GH_TOKEN). Windows portable: door-windows, emstudio-windows, qucs-s-windows, klayout-windows.</string>
      </property>
      <property name="wordWrap">
       <bool>true</bool>

@@ -15,7 +15,7 @@ DEFINES += QT_NO_DEPRECATED_WARNINGS
 INCLUDEPATH += src src/assistant
 
 LIBS += -lz
-win32:LIBS += -lcrypt32
+win32:LIBS += -lcrypt32 -lole32 -luuid
 
 win32 {
     QMAKE_CXXFLAGS += -Wa,-mbig-obj

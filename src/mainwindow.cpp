@@ -596,6 +596,11 @@ void MainWindow::loadSettings()
         const QString plain = SecureStore::unprotectFromBase64(enc);
         m_properties->set(QStringLiteral("ASSISTANT_API_KEY"), plain);
     }
+    {
+        const QString enc = settings.value(QStringLiteral("GH_TOKEN_DPAPI")).toString();
+        const QString plain = SecureStore::unprotectFromBase64(enc);
+        m_properties->set(QStringLiteral("GH_TOKEN"), plain);
+    }
 
     settings.endGroup();
 
@@ -3193,22 +3198,26 @@ void MainWindow::persistAssistantSettings()
     savePlain(QStringLiteral("ASSISTANT_BASE_URL"), QStringLiteral("https://api.openai.com/v1"));
     savePlain(QStringLiteral("ASSISTANT_MODEL"), QStringLiteral("gpt-4o-mini"));
 
-    // Never persist cleartext API key — only DPAPI blob for current Windows user.
-    settings.remove(QStringLiteral("ASSISTANT_API_KEY"));
-    const QString plain = m_properties->exists(QStringLiteral("ASSISTANT_API_KEY"))
-                              ? m_properties->get<QString>(QStringLiteral("ASSISTANT_API_KEY")).trimmed()
-                              : QString();
-    if (plain.isEmpty()) {
-        settings.remove(QStringLiteral("ASSISTANT_API_KEY_DPAPI"));
-    } else {
+    // Never persist cleartext secrets — only DPAPI blobs for current Windows user.
+    auto saveSecret = [&](const QString &plainKey, const QString &dpapiKey) {
+        settings.remove(plainKey);
+        const QString plain = m_properties->exists(plainKey)
+                                  ? m_properties->get<QString>(plainKey).trimmed()
+                                  : QString();
+        if (plain.isEmpty()) {
+            settings.remove(dpapiKey);
+            return;
+        }
         const QString enc = SecureStore::protectToBase64(plain);
         if (!enc.isEmpty()) {
-            settings.setValue(QStringLiteral("ASSISTANT_API_KEY_DPAPI"), enc);
+            settings.setValue(dpapiKey, enc);
         } else {
-            qWarning("DOOR: failed to encrypt ASSISTANT_API_KEY (not saved)");
-            settings.remove(QStringLiteral("ASSISTANT_API_KEY_DPAPI"));
+            qWarning("DOOR: failed to encrypt %s (not saved)", qPrintable(plainKey));
+            settings.remove(dpapiKey);
         }
-    }
+    };
+    saveSecret(QStringLiteral("ASSISTANT_API_KEY"), QStringLiteral("ASSISTANT_API_KEY_DPAPI"));
+    saveSecret(QStringLiteral("GH_TOKEN"), QStringLiteral("GH_TOKEN_DPAPI"));
 
     settings.endGroup();
 }

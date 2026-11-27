@@ -30,6 +30,7 @@ private slots:
     void onRowUpdateClicked();
     void onProbeFinished(int exitCode, QProcess::ExitStatus status);
     void onLatestFinished();
+    void onGhApiFinished(int exitCode, QProcess::ExitStatus status);
     void onGhTokenFinished(int exitCode, QProcess::ExitStatus status);
 
 private:
@@ -46,6 +47,7 @@ private:
         QPushButton *updateButton = nullptr;
         bool        probePending = false;
         bool        latestPending = false;
+        bool        triedFallbackArtifact = false;
     };
 
     void        buildRows();
@@ -56,16 +58,23 @@ private:
     void        runNextLatest();
     void        requestArtifactLatest(int index);
     void        requestRoomLatest(int index);
+    bool        startGhApi(const QString &endpoint);
+    void        startNetworkGet(const QUrl &url);
+    void        handleLatestPayload(const QByteArray &body, int httpStatus, const QString &netError);
     void        applyLatestResult(int index, const QString &artifactId, const QString &createdAt,
                                   const QString &error);
     void        ensureGithubToken();
     void        setVersionText(int index, const QString &text);
     void        setLatestText(int index, const QString &text, const QString &tooltip = QString());
+    void        setUpdateEnabled(int index, bool enabled, const QString &tooltip = QString());
+    void        refreshUpdateAllEnabled();
     QString     resolveToolPath(const QString &toolId) const;
     QString     probeProgram(const QString &path) const;
     QString     readInstalledArtifactId(const QString &toolId, const QString &path) const;
+    QString     readLocalGitShortSha(const QString &repoPath) const;
     static QString extractVersion(const QByteArray &raw);
     static QString artifactForTool(const QString &toolId);
+    static QString artifactFallbackForTool(const QString &toolId);
     static QString repoForTool(const QString &toolId);
     static QString shortDate(const QString &isoUtc);
 
@@ -74,12 +83,15 @@ private:
     QVector<ToolRow>        m_rows;
     QProcess                m_probe;
     QProcess                m_ghToken;
+    QProcess                m_ghApi;
     QNetworkAccessManager   m_nam;
     QNetworkReply          *m_latestReply = nullptr;
     QString                 m_githubToken;
+    QString                 m_ghExe;
     int                     m_probeIndex = -1;
     int                     m_latestIndex = -1;
     bool                    m_tokenReady = false;
+    bool                    m_latestIsRoom = false;
 };
 
 #endif // STACKUPDATESDIALOG_H

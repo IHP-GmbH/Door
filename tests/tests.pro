@@ -4,7 +4,7 @@
 
 QT += core gui widgets testlib concurrent network
 LIBS += -lz
-win32:LIBS += -lcrypt32
+win32:LIBS += -lcrypt32 -lole32 -luuid
 
 TEMPLATE = app
 TARGET = tst_libman_gui

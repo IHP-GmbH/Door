@@ -3,10 +3,16 @@
 #include "property.h"
 #include "toolpickerdialog.h"
 
+#include <QFileInfo>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QWidget>
+
+#if defined(Q_OS_WIN)
+#  include <windows.h>
+#  include <shlobj.h>
+#endif
 
 namespace {
 
@@ -141,4 +147,52 @@ QString resolveViewToolPath(const QVector<ViewToolEntry> &entries, QWidget *pare
         return {};
     }
     return dialog.selectedPath();
+}
+
+QString resolveToolLaunchPath(const QString &path)
+{
+    const QString trimmed = path.trimmed();
+    if (trimmed.isEmpty()) {
+        return trimmed;
+    }
+
+#if defined(Q_OS_WIN)
+    if (!trimmed.endsWith(QLatin1String(".lnk"), Qt::CaseInsensitive)) {
+        return trimmed;
+    }
+
+    HRESULT comHr = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+    const bool comOwned = SUCCEEDED(comHr);
+    QString resolved = trimmed;
+
+    IShellLinkW *shellLink = nullptr;
+    if (SUCCEEDED(CoCreateInstance(CLSID_ShellLink, nullptr, CLSCTX_INPROC_SERVER, IID_IShellLinkW,
+                                   reinterpret_cast<void **>(&shellLink)))
+        && shellLink) {
+        IPersistFile *persist = nullptr;
+        if (SUCCEEDED(shellLink->QueryInterface(IID_IPersistFile, reinterpret_cast<void **>(&persist)))
+            && persist) {
+            if (SUCCEEDED(persist->Load(reinterpret_cast<LPCWSTR>(trimmed.utf16()), STGM_READ))) {
+                wchar_t target[MAX_PATH] = {};
+                WIN32_FIND_DATAW findData = {};
+                if (SUCCEEDED(shellLink->GetPath(target, MAX_PATH, &findData, SLGP_UNCPRIORITY))) {
+                    const QString candidate = QString::fromWCharArray(target).trimmed();
+                    if (!candidate.isEmpty()) {
+                        resolved = candidate;
+                    }
+                }
+            }
+            persist->Release();
+        }
+        shellLink->Release();
+    }
+
+    if (comOwned) {
+        CoUninitialize();
+    }
+    return resolved;
+#else
+    Q_UNUSED(trimmed);
+    return path.trimmed();
+#endif
 }

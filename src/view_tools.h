@@ -17,5 +17,7 @@ QString     viewToolsPropertyKey(const QString &groupName);
 QVector<ViewToolEntry> loadViewTools(const Properties *properties, const QString &groupName);
 void        saveViewTools(Properties *properties, const QString &groupName, const QVector<ViewToolEntry> &entries);
 QString     resolveViewToolPath(const QVector<ViewToolEntry> &entries, QWidget *parent);
+/*! Expand a Windows .lnk shortcut to its target path; otherwise return \a path unchanged. */
+QString     resolveToolLaunchPath(const QString &path);
 
 #endif // VIEW_TOOLS_H

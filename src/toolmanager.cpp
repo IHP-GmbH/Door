@@ -155,6 +155,26 @@ void ToolManager::init()
                            : QString());
     room->addSubProperty(roomPath);
 
+    // GitHub token for Check for updates / CI artifact API (private repos).
+    QtVariantProperty *github =
+        m_vmSettings->addProperty(QtVariantPropertyManager::groupTypeId(), tr("GitHub"));
+    m_pbSettings->addProperty(github);
+
+    QtVariantProperty *ghToken =
+        m_vmSettings->addProperty(VariantManager::filePathTypeId(), QStringLiteral("GH_TOKEN"));
+    ghToken->setWhatsThis(QStringLiteral("password")); // masked FileEdit + DPAPI at rest
+    ghToken->setToolTip(tr(
+        "GitHub personal access token (fine-grained: Actions Read on Door/Qucs/Xschem/"
+        "KLayout/EMStudio/Room).\n"
+        "Used by Help → Check for updates to query CI artifacts.\n"
+        "Shown masked. Stored encrypted with Windows DPAPI (current user) — "
+        "never written cleartext to settings.\n"
+        "Falls back to GH_TOKEN env or `gh auth token` if empty."));
+    ghToken->setValue(m_properties->exists(QStringLiteral("GH_TOKEN"))
+                          ? m_properties->get<QString>(QStringLiteral("GH_TOKEN"))
+                          : QString());
+    github->addSubProperty(ghToken);
+
     // Assistant (LLM agent) — same keys as EMStudio Preferences → Assistant.
     QtVariantProperty *assistant =
         m_vmSettings->addProperty(QtVariantPropertyManager::groupTypeId(), tr("Assistant"));
@@ -276,6 +296,7 @@ void ToolManager::on_btnOk_clicked()
         }
 
         if (q->propertyName() == QLatin1String("Assistant")
+            || q->propertyName() == QLatin1String("GitHub")
             || q->propertyName() == QLatin1String("PDK")) {
             QList<QtProperty *> l = q->subProperties();
             for (QtProperty *p : l) {
