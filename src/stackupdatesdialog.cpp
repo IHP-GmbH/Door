@@ -250,25 +250,79 @@ void StackUpdatesDialog::buildRows()
     grid->setColumnStretch(1, 1);
 }
 
-QString StackUpdatesDialog::readLocalGitShortSha(const QString &repoPath) const
+QString StackUpdatesDialog::findGitRoot(const QString &path) const
 {
-    if (repoPath.isEmpty()) {
+    if (path.isEmpty()) {
         return {};
     }
-    QFile head(QDir(repoPath).filePath(QStringLiteral(".git/HEAD")));
+    QFileInfo fi(path);
+    QDir dir = fi.isDir() ? QDir(fi.absoluteFilePath()) : fi.absoluteDir();
+    for (int i = 0; i < 8; ++i) {
+        if (QFileInfo::exists(dir.filePath(QStringLiteral(".git")))) {
+            return dir.absolutePath();
+        }
+        if (!dir.cdUp()) {
+            break;
+        }
+    }
+    return {};
+}
+
+QString StackUpdatesDialog::readLocalGitShortSha(const QString &repoPath) const
+{
+    const QString root = QFileInfo(repoPath).isDir() && QFileInfo::exists(QDir(repoPath).filePath(QStringLiteral(".git")))
+                             ? repoPath
+                             : findGitRoot(repoPath);
+    if (root.isEmpty()) {
+        return {};
+    }
+    QFile head(QDir(root).filePath(QStringLiteral(".git/HEAD")));
     if (!head.open(QIODevice::ReadOnly | QIODevice::Text)) {
         return {};
     }
     const QByteArray line = head.readLine().trimmed();
     head.close();
     if (line.startsWith("ref: ")) {
-        QFile ref(QDir(repoPath).filePath(QStringLiteral(".git/") + QString::fromUtf8(line.mid(5))));
+        QFile ref(QDir(root).filePath(QStringLiteral(".git/") + QString::fromUtf8(line.mid(5))));
         if (!ref.open(QIODevice::ReadOnly | QIODevice::Text)) {
             return {};
         }
         return QString::fromUtf8(ref.readLine().trimmed()).left(7);
     }
     return QString::fromUtf8(line).left(7);
+}
+
+bool StackUpdatesDialog::isLocalDevBuild(const QString &toolId, const QString &path) const
+{
+    if (path.isEmpty()) {
+        return false;
+    }
+    const QString root = findGitRoot(path);
+    if (root.isEmpty()) {
+        return false;
+    }
+    const QString rootName = QFileInfo(root).fileName().toLower();
+    // Match checkout folder to tool (Door, EMStudio, Qucs-S-roomdb, …).
+    if (toolId == QLatin1String("door") && !rootName.contains(QLatin1String("door"))) {
+        return false;
+    }
+    if (toolId == QLatin1String("emstudio") && !rootName.contains(QLatin1String("emstudio"))) {
+        return false;
+    }
+    if (toolId == QLatin1String("qucs")
+        && !rootName.contains(QLatin1String("qucs"))) {
+        return false;
+    }
+    if (toolId == QLatin1String("klayout")
+        && !rootName.contains(QLatin1String("klayout"))) {
+        return false;
+    }
+    // Binary lives under a source checkout (build-mingw, build-local-*, release, …).
+    const QString norm = QDir::fromNativeSeparators(path).toLower();
+    return norm.contains(QLatin1String("/build"))
+           || norm.contains(QLatin1String("/release"))
+           || norm.contains(QLatin1String("/debug"))
+           || norm.contains(QLatin1String("/bin-release"));
 }
 
 QString StackUpdatesDialog::readInstalledArtifactId(const QString &toolId, const QString &path) const
@@ -739,6 +793,7 @@ void StackUpdatesDialog::handleLatestPayload(const QByteArray &body, int httpSta
 
     QString artId;
     QString created;
+    QString headSha;
     if (doc.isObject()) {
         const QJsonArray arts = doc.object().value(QStringLiteral("artifacts")).toArray();
         for (const QJsonValue &v : arts) {
@@ -748,6 +803,10 @@ void StackUpdatesDialog::handleLatestPayload(const QByteArray &body, int httpSta
             }
             artId = QString::number(a.value(QStringLiteral("id")).toVariant().toLongLong());
             created = a.value(QStringLiteral("created_at")).toString();
+            headSha = a.value(QStringLiteral("workflow_run"))
+                          .toObject()
+                          .value(QStringLiteral("head_sha"))
+                          .toString();
             if (!artId.isEmpty()) {
                 break;
             }
@@ -764,11 +823,12 @@ void StackUpdatesDialog::handleLatestPayload(const QByteArray &body, int httpSta
         applyLatestResult(idx, {}, {}, tr("no artifact yet (%1)").arg(m_rows[idx].artifactName));
         return;
     }
-    applyLatestResult(idx, artId, created, {});
+    applyLatestResult(idx, artId, created, {}, headSha);
 }
 
 void StackUpdatesDialog::applyLatestResult(int index, const QString &artifactId,
-                                           const QString &createdAt, const QString &error)
+                                           const QString &createdAt, const QString &error,
+                                           const QString &ciHeadSha)
 {
     if (index < 0 || index >= m_rows.size()) {
         return;
@@ -821,13 +881,28 @@ void StackUpdatesDialog::applyLatestResult(int index, const QString &artifactId,
     } else {
         text = date.isEmpty() ? artifactId : date;
         tip = tr("CI artifact %1 (id=%2)").arg(m_rows[index].artifactName, artifactId);
-        // No BUNDLE_SOURCE.txt — cannot prove installed == latest; keep Update enabled.
-        updateAvailable = !artifactId.isEmpty();
+
+        const QString localSha = readLocalGitShortSha(m_rows[index].path);
+        const QString ciShort = ciHeadSha.left(7);
+        if (!localSha.isEmpty() && !ciShort.isEmpty() && localSha == ciShort) {
+            text += QStringLiteral(" · ") + tr("up to date");
+            tip = tr("Local git %1 matches CI").arg(localSha);
+            upToDate = true;
+        } else if (isLocalDevBuild(m_rows[index].id, m_rows[index].path)) {
+            // Source-tree binary (e.g. Door/build-mingw) — treat as current; no CI reinstall.
+            text += QStringLiteral(" · ") + tr("local build");
+            tip = tr("Running from local source tree%1 — Update not needed.")
+                      .arg(localSha.isEmpty() ? QString()
+                                              : QStringLiteral(" (%1)").arg(localSha));
+            upToDate = true;
+        } else {
+            updateAvailable = !artifactId.isEmpty();
+        }
     }
 
     setLatestText(index, text, tip);
     if (upToDate) {
-        setUpdateEnabled(index, false, tr("Already on the latest CI build."));
+        setUpdateEnabled(index, false, tip.isEmpty() ? tr("Already on the latest build.") : tip);
     } else if (updateAvailable) {
         setUpdateEnabled(index, true,
                          tr("Download/install from CI is not wired yet."));

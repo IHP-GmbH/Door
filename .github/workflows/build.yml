@@ -569,19 +569,23 @@ jobs:
             /O"build\installer"
 
       - name: Package Windows portable zip
-        shell: bash
+        shell: pwsh
         run: |
-          set -euo pipefail
-          test -x build/dist/door.exe
-          {
-            echo "flavor=windows"
-            echo "created_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-            echo "source=door-windows"
-          } > build/dist/BUNDLE_SOURCE.txt
-          mkdir -p build/portable
+          if (!(Test-Path "build\dist\door.exe")) {
+            Write-Error "Missing build\dist\door.exe"
+          }
+          $stamp = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
+          @(
+            "flavor=windows"
+            "created_at=$stamp"
+            "source=door-windows"
+          ) | Set-Content -Encoding ascii "build\dist\BUNDLE_SOURCE.txt"
+          New-Item -ItemType Directory -Force -Path "build\portable" | Out-Null
+          $zip = "build\portable\door-windows.zip"
+          if (Test-Path $zip) { Remove-Item $zip -Force }
           # Zip contents of dist/ so unpack yields door.exe + Qt next to it.
-          (cd build/dist && zip -r -q ../portable/door-windows.zip .)
-          ls -la build/portable/door-windows.zip
+          Compress-Archive -Path "build\dist\*" -DestinationPath $zip -Force
+          Get-Item $zip | Format-List Name, Length, FullName
 
       - name: Upload Windows portable bundle
         uses: actions/upload-artifact@v4

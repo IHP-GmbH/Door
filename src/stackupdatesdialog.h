@@ -62,7 +62,7 @@ private:
     void        startNetworkGet(const QUrl &url);
     void        handleLatestPayload(const QByteArray &body, int httpStatus, const QString &netError);
     void        applyLatestResult(int index, const QString &artifactId, const QString &createdAt,
-                                  const QString &error);
+                                  const QString &error, const QString &ciHeadSha = QString());
     void        ensureGithubToken();
     void        setVersionText(int index, const QString &text);
     void        setLatestText(int index, const QString &text, const QString &tooltip = QString());
@@ -72,6 +72,8 @@ private:
     QString     probeProgram(const QString &path) const;
     QString     readInstalledArtifactId(const QString &toolId, const QString &path) const;
     QString     readLocalGitShortSha(const QString &repoPath) const;
+    QString     findGitRoot(const QString &path) const;
+    bool        isLocalDevBuild(const QString &toolId, const QString &path) const;
     static QString extractVersion(const QByteArray &raw);
     static QString artifactForTool(const QString &toolId);
     static QString artifactFallbackForTool(const QString &toolId);
